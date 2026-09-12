@@ -32,6 +32,7 @@ namespace SageBridge.Tests
                 TestSyncFieldNames();
                 TestProvisioningReportedFromSync();
                 TestHeartbeatWired();
+                TestInvoiceBalanceUsesTransactionNetting();
             }
             catch (Exception ex)
             {
@@ -363,6 +364,47 @@ namespace SageBridge.Tests
             Assert(!sageService.Contains("INSERT INTO"), "No INSERT statements in SageService");
             Assert(!sageService.Contains("UPDATE ") || !sageService.Contains("SET"), "No UPDATE statements in SageService");
             Assert(!sageService.Contains("DELETE FROM"), "No DELETE statements in SageService");
+        }
+
+        // ---------------------------------------------------------------------------
+        // 13. Regression guard for the A/R aging bug: a dashboard total far
+        //     larger than real receivables, traced to per-invoice balance
+        //     coming from tCusTrDt.dAmtOwg scoped to the invoice's own lId -
+        //     which this codebase's own GetARAgingAsync query shows can never
+        //     see a later receipt/credit (those are separate nTranType 1/2
+        //     transactions with their own lId). Balance must instead use the
+        //     same transaction-netting basis as GetARAgingAsync, and due
+        //     dates must actually be read (previously never selected at all,
+        //     which put every invoice in a single "Current" bucket).
+        // ---------------------------------------------------------------------------
+        static void TestInvoiceBalanceUsesTransactionNetting()
+        {
+            Console.WriteLine("\n13. Invoice balance uses transaction netting, not tCusTrDt.dAmtOwg");
+
+            var repositoryImpls = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositoryImpls.cs");
+            Assert(!repositoryImpls.Contains("tCusTrDt"), "No remaining tCusTrDt/dAmtOwg lookups for invoice balance (replaced with transaction netting)");
+            Assert(!repositoryImpls.Contains("dAmtOwg"), "No remaining dAmtOwg references");
+
+            int getInvoicesStart = repositoryImpls.IndexOf("public async Task<List<InvoiceRecord>> GetInvoicesAsync()");
+            int getSummaryStart = repositoryImpls.IndexOf("public async Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync()");
+            Assert(getInvoicesStart >= 0 && getSummaryStart >= 0, "GetInvoicesAsync and GetInvoiceSummaryAsync both exist");
+
+            string getInvoicesBody = getInvoicesStart >= 0 ? repositoryImpls.Substring(getInvoicesStart, Math.Min(3000, repositoryImpls.Length - getInvoicesStart)) : "";
+            string getSummaryBody = getSummaryStart >= 0 ? repositoryImpls.Substring(getSummaryStart, Math.Min(2000, repositoryImpls.Length - getSummaryStart)) : "";
+
+            Assert(getInvoicesBody.Contains("GREATEST(0, LEAST(") && getInvoicesBody.Contains("nTranType = 0") && getInvoicesBody.Contains("nTranType IN (1, 2)"),
+                "GetInvoicesAsync nets nTranType=0 charges against nTranType IN (1,2) receipts/credits (same basis as GetARAgingAsync)");
+            Assert(getSummaryBody.Contains("GREATEST(0, LEAST("),
+                "GetInvoiceSummaryAsync's paid/unpaid counts use the same balance formula as GetInvoicesAsync, so they cannot disagree");
+
+            Assert(getInvoicesBody.Contains("dtDueDate"), "GetInvoicesAsync reads a due date");
+            Assert(getInvoicesBody.Contains("catch (Exception"), "Due-date lookup is defensive - an unverified column name cannot break the rest of invoice sync");
+
+            var repositories = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositories.cs");
+            Assert(repositories.Contains("DateTime? DueDate"), "InvoiceRecord carries a DueDate field");
+
+            var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
+            Assert(sageService.Contains("i.DueDate"), "SageService.GetInvoicesAsync threads DueDate into the sync payload");
         }
     }
 }
