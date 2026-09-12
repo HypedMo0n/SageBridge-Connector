@@ -92,7 +92,7 @@ namespace SageBridge.Connector
             return new PairingRequest
             {
                 pairingCode = pairingCode.Trim().ToUpperInvariant(),
-                connectorVersion = "1.1.0",
+                connectorVersion = ConnectorVersion.Current,
                 machineName = machineName ?? Environment.MachineName,
                 installationId = CredentialManager.GetOrCreateInstallationId()
             };

@@ -275,20 +275,69 @@ namespace SageBridge.Tests
 
         static void TestStableInstallationIdentity()
         {
-            Console.WriteLine("\n9. Stable installation identity tests");
+            Console.WriteLine("\n9. Stable installation identity lifecycle");
+
+            // Test 1: First run creates and persists installationId
             var first = CredentialManager.GetOrCreateInstallationId();
+            Assert(Guid.TryParse(first.StartsWith("inst_") ? first.Substring(5) : "", out _),
+                "First run creates a valid inst_<UUID> installation ID");
+
+            // Test 2: Second call returns same ID (persisted)
             var second = CredentialManager.GetOrCreateInstallationId();
-            Assert(first == second, "Installation ID survives repeated reads");
-            Assert(first.StartsWith("inst_") && Guid.TryParse(first.Substring(5), out _), "Installation ID is inst_<UUID>");
+            Assert(first == second, "Restart reuses the same installation ID from disk");
 
-            CredentialManager.StoreCredential("connector-one", "credential-one");
+            // Test 3: Second installation (fresh directory) gets different ID
+            var freshDir = Path.Combine(Path.GetTempPath(), "sagebridge_install_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(freshDir);
+            var originalDir = CredentialManager.TestStorageDirectory;
+            CredentialManager.TestStorageDirectory = freshDir;
+            try
+            {
+                var different = CredentialManager.GetOrCreateInstallationId();
+                Assert(different != first, "Second installation gets a different installation ID");
+                Assert(Guid.TryParse(different.StartsWith("inst_") ? different.Substring(5) : "", out _),
+                    "Second installation ID is valid inst_<UUID>");
+            }
+            finally
+            {
+                CredentialManager.TestStorageDirectory = originalDir;
+                if (Directory.Exists(freshDir)) Directory.Delete(freshDir, true);
+            }
+
+            // Test 4: Credential rotation (store + delete) preserves installationId
+            CredentialManager.StoreCredential("conn-test", "cred-test");
             CredentialManager.DeleteCredential();
-            Assert(CredentialManager.GetOrCreateInstallationId() == first, "Credential rotation/deletion does not regenerate installation ID");
+            Assert(CredentialManager.GetOrCreateInstallationId() == first,
+                "Credential rotation/deletion does not regenerate installation ID");
 
-            var request = PairingClient.CreatePairingRequest("abcd-efgh", "RENAMED-PC");
-            Assert(request.installationId == first, "Pairing request includes stable installation ID");
-            Assert(request.machineName == "RENAMED-PC", "Machine name remains metadata only");
-            Assert(request.connectorVersion == "1.1.0", "Updated pairing contract version is sent");
+            // Test 5: Re-pairing (new credential) preserves installationId
+            CredentialManager.StoreCredential("conn-new", "cred-new");
+            try
+            {
+                Assert(CredentialManager.GetOrCreateInstallationId() == first,
+                    "Re-pairing with new credential reuses the same installation ID");
+            }
+            finally
+            {
+                CredentialManager.DeleteCredential();
+            }
+
+            // Test 6: Pairing request body contains installationId matching API format
+            var request = PairingClient.CreatePairingRequest("ABCD-EFGH", "RENAMED-PC");
+            Assert(request.installationId == first,
+                "Pairing request includes the stable installation ID");
+            Assert(request.installationId.StartsWith("inst_"),
+                "Pairing request installationId starts with inst_");
+            Assert(request.pairingCode == "ABCD-EFGH",
+                "Pairing code is normalized to uppercase");
+            Assert(request.machineName == "RENAMED-PC",
+                "Machine name is included but treated as metadata only");
+            Assert(request.connectorVersion == ConnectorVersion.Current,
+                "Pairing request sends the shared authoritative connector version");
+
+            // Test 7: ConnectorVersion is shared between PairingClient and HeartbeatSender
+            Assert(ConnectorVersion.Current == "1.1.0",
+                "Connector version is the single authoritative source (v1.1.0)");
         }
     }
 }

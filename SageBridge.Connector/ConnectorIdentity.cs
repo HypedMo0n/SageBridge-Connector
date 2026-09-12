@@ -159,6 +159,15 @@ namespace SageBridge.Connector
     }
 
     /// <summary>
+    /// Connector version constant, shared by pairing and heartbeat.
+    /// Single source of truth — never hardcode version strings elsewhere.
+    /// </summary>
+    public static class ConnectorVersion
+    {
+        public const string Current = "1.1.0";
+    }
+
+    /// <summary>
     /// Generates high-entropy connector credentials and pairing codes.
     /// 
     /// RNG: Uses RandomNumberGenerator.Create() which returns a CSPRNG

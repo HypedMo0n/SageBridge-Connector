@@ -19,7 +19,7 @@ namespace SageBridge.Connector
             try
             {
                 Log.Information("╔════════════════════════════════════════╗");
-                Log.Information("║   SageBridge Connector v1.0.0          ║");
+                Log.Information("║   SageBridge Connector v{Version}          ║", ConnectorVersion.Current);
                 Log.Information("║   Sage 50 Canada → Cloudflare Bridge   ║");
                 Log.Information("╚════════════════════════════════════════╝");
                 Log.Information("");

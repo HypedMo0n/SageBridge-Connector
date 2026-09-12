@@ -30,7 +30,7 @@ namespace SageBridge.Connector
     public class HeartbeatSender
     {
         private const int IntervalSeconds = 30;
-        private const string ConnectorVersion = "1.0.0";
+
 
         private readonly ConnectorConfig _config;
         private readonly SageService _sageService;
@@ -78,7 +78,7 @@ namespace SageBridge.Connector
             {
                 var response = await _auth.PostAsync("/connector/heartbeat", new
                 {
-                    connectorVersion = ConnectorVersion,
+                    connectorVersion = ConnectorVersion.Current,
                     sageVersion = (string?)null,
                     sageConnected = _sageService.IsConnected
                 });
