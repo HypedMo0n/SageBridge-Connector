@@ -30,6 +30,7 @@ namespace SageBridge.Tests
                 TestPairingClientValidation();
                 TestConnectorIdentityModel();
                 TestAuthenticatorHeaders();
+                TestStableInstallationIdentity();
             }
             catch (Exception ex)
             {
@@ -270,6 +271,24 @@ namespace SageBridge.Tests
 
             // Clean up
             CredentialManager.DeleteCredential();
+        }
+
+        static void TestStableInstallationIdentity()
+        {
+            Console.WriteLine("\n9. Stable installation identity tests");
+            var first = CredentialManager.GetOrCreateInstallationId();
+            var second = CredentialManager.GetOrCreateInstallationId();
+            Assert(first == second, "Installation ID survives repeated reads");
+            Assert(first.StartsWith("inst_") && Guid.TryParse(first.Substring(5), out _), "Installation ID is inst_<UUID>");
+
+            CredentialManager.StoreCredential("connector-one", "credential-one");
+            CredentialManager.DeleteCredential();
+            Assert(CredentialManager.GetOrCreateInstallationId() == first, "Credential rotation/deletion does not regenerate installation ID");
+
+            var request = PairingClient.CreatePairingRequest("abcd-efgh", "RENAMED-PC");
+            Assert(request.installationId == first, "Pairing request includes stable installation ID");
+            Assert(request.machineName == "RENAMED-PC", "Machine name remains metadata only");
+            Assert(request.connectorVersion == "1.1.0", "Updated pairing contract version is sent");
         }
     }
 }

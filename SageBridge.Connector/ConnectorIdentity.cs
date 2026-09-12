@@ -103,12 +103,51 @@ namespace SageBridge.Connector
             return RetrieveCredential() != null;
         }
 
+        /// <summary>
+        /// Returns the stable, non-secret ID for this installation. It is
+        /// stored separately so credential rotation never changes identity.
+        /// </summary>
+        public static string GetOrCreateInstallationId()
+        {
+            var path = GetInstallationIdFilePath();
+            if (File.Exists(path))
+            {
+                var existing = File.ReadAllText(path).Trim();
+                if (Guid.TryParse(existing.StartsWith("inst_") ? existing.Substring(5) : "", out _))
+                    return existing;
+            }
+
+            var installationId = "inst_" + Guid.NewGuid().ToString();
+            try
+            {
+                using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+                writer.Write(installationId);
+                return installationId;
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                var existing = File.ReadAllText(path).Trim();
+                if (Guid.TryParse(existing.StartsWith("inst_") ? existing.Substring(5) : "", out _))
+                    return existing;
+                throw;
+            }
+        }
+
         private static string GetCredentialFilePath()
         {
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             var dir = TestStorageDirectory ?? Path.Combine(appData, "SageBridgeConnector");
             Directory.CreateDirectory(dir);
             return Path.Combine(dir, "credential.bin");
+        }
+
+        private static string GetInstallationIdFilePath()
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var dir = TestStorageDirectory ?? Path.Combine(appData, "SageBridgeConnector");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "installation-id");
         }
     }
 

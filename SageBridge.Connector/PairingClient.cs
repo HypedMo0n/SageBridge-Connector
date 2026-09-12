@@ -43,12 +43,7 @@ namespace SageBridge.Connector
             if (string.IsNullOrWhiteSpace(pairingCode))
                 throw new ArgumentException("Pairing code is required.", nameof(pairingCode));
 
-            var request = new
-            {
-                pairingCode = pairingCode.Trim().ToUpperInvariant(),
-                connectorVersion = "1.0.0",
-                machineName = machineName ?? Environment.MachineName
-            };
+            var request = CreatePairingRequest(pairingCode, machineName);
 
             var json = JsonConvert.SerializeObject(request);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -91,6 +86,25 @@ namespace SageBridge.Connector
                 PairedAt = stored.StoredAt
             };
         }
+
+        internal static PairingRequest CreatePairingRequest(string pairingCode, string? machineName = null)
+        {
+            return new PairingRequest
+            {
+                pairingCode = pairingCode.Trim().ToUpperInvariant(),
+                connectorVersion = "1.1.0",
+                machineName = machineName ?? Environment.MachineName,
+                installationId = CredentialManager.GetOrCreateInstallationId()
+            };
+        }
+    }
+
+    internal class PairingRequest
+    {
+        public string pairingCode { get; set; } = "";
+        public string connectorVersion { get; set; } = "";
+        public string machineName { get; set; } = "";
+        public string installationId { get; set; } = "";
     }
 
     public class PairingResult
