@@ -115,5 +115,19 @@ namespace SageBridge.Connector
         /// Get a summary of invoice totals by paid/unpaid status.
         /// </summary>
         Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync();
+
+        /// <summary>
+        /// Check if an invoice with the given number exists (for crash-safety
+        /// reconciliation, mirroring ISageQuoteRepository.QuoteExistsAsync).
+        /// </summary>
+        Task<bool> InvoiceExistsAsync(string invoiceNumber);
+
+        /// <summary>
+        /// Find the most recently created invoice for a customer. Used
+        /// immediately after Post() to read back the Sage-assigned invoice
+        /// number, the same way FindLastCreatedCustomerAsync retrieves a new
+        /// customer's assigned id.
+        /// </summary>
+        Task<InvoiceRecord?> FindLastCreatedInvoiceAsync(string customerName);
     }
 }

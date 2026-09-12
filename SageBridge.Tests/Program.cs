@@ -28,6 +28,7 @@ namespace SageBridge.Tests
                 TestValidationLogic();
                 TestLedgerReplay();
                 TestCanonicalizationDeterminism();
+                TestResultPendingSurvivesInterruption();
             }
             catch (Exception ex)
             {
@@ -387,6 +388,82 @@ namespace SageBridge.Tests
             var hashD = OperationLedger.ComputeHash("quote.create", payloadD);
             Assert(hashA == hashD, "Identical payloads (same line order) produce identical hash",
                 $"hashA={hashA} hashD={hashD}");
+        }
+
+        // ---------------------------------------------------------------------------
+        // 7. result_pending: the ledger state that protects the dangerous case
+        //    "Sage Post() succeeds, then the connection drops before the cloud
+        //    hears about it, then the job is retried." The Sage write must
+        //    never be re-attempted once a SageRecordId is on record; only
+        //    delivery of the already-known result may be retried.
+        // ---------------------------------------------------------------------------
+        static void TestResultPendingSurvivesInterruption()
+        {
+            Console.WriteLine("7. result_pending survives an interrupted cloud ack");
+
+            var scratchDir = Path.Combine(Path.GetTempPath(), $"sagebridge_test_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(scratchDir);
+            var dbPath = Path.Combine(scratchDir, "test_ledger.db");
+
+            try
+            {
+                var companyId = "test-company";
+                var key = "idem-pending-001";
+                var action = "invoice.create";
+                var payload = JObject.Parse(@"{""customerId"":""10"",""lines"":[{""sku"":""A"",""quantity"":1,""unitPrice"":10}]}");
+                var hash = OperationLedger.ComputeHash(action, payload);
+
+                using (var ledger = new OperationLedger(dbPath))
+                {
+                    var op = ledger.CreateOperation(key, companyId, action, hash, payload.ToString(), "job-pending-1");
+                    Assert(op != null, "Created operation for result_pending test");
+                    Assert(op.State == "processing", "New operation starts as processing", $"state={op.State}");
+
+                    // Simulate: Sage Post() succeeded and we know the record id, but
+                    // the cloud has not acknowledged the result yet.
+                    var invoiceId = "8421";
+                    ledger.UpdateSageRecordId(key, companyId, invoiceId);
+                    ledger.MarkResultPending(key, companyId);
+
+                    var pending = ledger.GetOperation(key, companyId);
+                    Assert(pending.State == "result_pending", "Operation is result_pending after a successful write with no cloud ack yet",
+                        $"state={pending.State}");
+                    Assert(pending.SageRecordId == invoiceId, "SageRecordId is retained while result_pending",
+                        $"stored={pending.SageRecordId} expected={invoiceId}");
+                    Assert(!pending.CompletedAt.HasValue, "result_pending is not a completed/terminal state",
+                        $"completed_at={pending.CompletedAt}");
+                }
+
+                // Simulate a full connector restart: reopen the same ledger file
+                // and confirm the pending operation - and its SageRecordId - is
+                // still there for FlushPendingResults/ReconcileUncertainOperations
+                // to find and retry delivering, without touching Sage again.
+                using (var reopened = new OperationLedger(dbPath))
+                {
+                    var survived = reopened.GetOperation(key, companyId);
+                    Assert(survived != null, "result_pending operation survives a connector restart");
+                    Assert(survived.State == "result_pending", "State is still result_pending after restart",
+                        $"state={survived.State}");
+                    Assert(survived.SageRecordId == invoiceId, "SageRecordId survives restart intact",
+                        $"stored={survived.SageRecordId}");
+
+                    var pendingOps = reopened.GetOperationsByState("result_pending");
+                    Assert(pendingOps.Any(o => o.IdempotencyKey == key), "GetOperationsByState(\"result_pending\") finds the operation for retry");
+
+                    // Simulate the retried delivery finally reaching the cloud.
+                    reopened.MarkSucceeded(key, companyId);
+                    var delivered = reopened.GetOperation(key, companyId);
+                    Assert(delivered.State == "succeeded", "Once delivered, state moves to succeeded",
+                        $"state={delivered.State}");
+                    Assert(delivered.SageRecordId == invoiceId, "SageRecordId unchanged by the delivery-only transition",
+                        $"stored={delivered.SageRecordId}");
+                    Assert(delivered.CompletedAt.HasValue, "succeeded is terminal and sets completed_at");
+                }
+            }
+            finally
+            {
+                try { Directory.Delete(scratchDir, true); } catch { }
+            }
         }
     }
 }

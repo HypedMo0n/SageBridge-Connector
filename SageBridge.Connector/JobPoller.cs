@@ -56,13 +56,15 @@ namespace SageBridge.Connector
             Log.Information("Reconciling uncertain operations from previous session...");
             try
             {
+                FlushPendingResults().GetAwaiter().GetResult();
+
                 var uncertainOps = _ledger.GetOperationsByState("processing");
                 foreach (var op in uncertainOps)
                 {
                     Log.Information("Found uncertain operation: {Key} - checking Sage", op.IdempotencyKey);
-                    if (op.Action == "quote.create")
+                    if (op.Action == "quote.create" || op.Action == "invoice.create")
                     {
-                        ReconcileUncertainQuote(op);
+                        ReconcileUncertainNumberedDocument(op);
                         continue;
                     }
 
@@ -86,42 +88,116 @@ namespace SageBridge.Connector
             }
         }
 
-        private void ReconcileUncertainQuote(OperationRecord op)
+        /// <summary>
+        /// Reconciles a quote.create or invoice.create operation whose local
+        /// state is unclear (interrupted after Post() but before the ledger
+        /// could confirm delivery) by checking whether the document actually
+        /// exists in Sage under the previously recorded SageRecordId. Never
+        /// re-runs the Sage write - only decides succeeded vs. uncertain.
+        /// </summary>
+        private void ReconcileUncertainNumberedDocument(OperationRecord op)
         {
             var sageId = op.SageRecordId;
+            var kind = op.Action == "invoice.create" ? "invoice" : "quote";
             if (string.IsNullOrWhiteSpace(sageId))
             {
                 Log.Warning(
-                    "Uncertain quote.create operation {Key} has no sage_record_id - cannot reconcile automatically",
-                    op.IdempotencyKey);
+                    "Uncertain {Action} operation {Key} has no sage_record_id - cannot reconcile automatically",
+                    op.Action, op.IdempotencyKey);
                 _ledger.MarkUncertain(op.IdempotencyKey, op.CompanyId);
                 return;
             }
 
             try
             {
-                bool exists = _sageService.QuoteExistsInSage(sageId);
+                bool exists = op.Action == "invoice.create"
+                    ? _sageService.InvoiceExistsInSage(sageId)
+                    : _sageService.QuoteExistsInSage(sageId);
                 if (exists)
                 {
                     _ledger.MarkSucceeded(op.IdempotencyKey, op.CompanyId);
                     Log.Information(
-                        "Reconciled uncertain quote {QuoteNumber}: found in Sage, marked succeeded",
-                        sageId);
+                        "Reconciled uncertain {Kind} {Number}: found in Sage, marked succeeded",
+                        kind, sageId);
                 }
                 else
                 {
                     _ledger.MarkUncertain(op.IdempotencyKey, op.CompanyId);
                     Log.Warning(
-                        "Reconciled uncertain quote {QuoteNumber}: not found in Sage, left uncertain for manual review",
-                        sageId);
+                        "Reconciled uncertain {Kind} {Number}: not found in Sage, left uncertain for manual review",
+                        kind, sageId);
                 }
             }
             catch (Exception ex)
             {
                 Log.Error(ex,
-                    "Failed to reconcile uncertain quote {QuoteNumber} - leaving uncertain",
-                    sageId);
+                    "Failed to reconcile uncertain {Kind} {Number} - leaving uncertain",
+                    kind, sageId);
                 _ledger.MarkUncertain(op.IdempotencyKey, op.CompanyId);
+            }
+        }
+
+        /// <summary>
+        /// Retries delivering a result the connector already knows (Sage
+        /// write confirmed succeeded, SageRecordId known) but the cloud has
+        /// not yet acknowledged. Re-sends the claim first in case the
+        /// original /start call itself never reached the cloud, then
+        /// re-submits the terminal result. Never touches Sage again.
+        /// </summary>
+        private async Task RetryResultDelivery(OperationRecord op)
+        {
+            if (string.IsNullOrWhiteSpace(op.JobId))
+            {
+                Log.Warning(
+                    "Operation {Key} is result_pending but has no jobId recorded - cannot redeliver",
+                    op.IdempotencyKey);
+                return;
+            }
+
+            await MarkJobStarted(op.JobId);
+            var delivered = await SubmitJobResult(op.JobId, "succeeded", op.SageRecordId, null);
+            if (delivered)
+            {
+                _ledger.MarkSucceeded(op.IdempotencyKey, op.CompanyId);
+                _completedIdempotencyKeys.Add(op.IdempotencyKey);
+                Log.Information(
+                    "Delivered previously-pending result for {Key} (SageRecordId {Id})",
+                    op.IdempotencyKey, op.SageRecordId);
+            }
+            else
+            {
+                Log.Warning(
+                    "Still unable to deliver pending result for {Key} - will retry on next poll",
+                    op.IdempotencyKey);
+            }
+        }
+
+        /// <summary>
+        /// Retries delivery for every operation whose Sage write is known to
+        /// have succeeded but whose cloud acknowledgement is still missing.
+        /// Runs every poll tick (not only when the job reappears in
+        /// /connector/jobs) because the cloud only re-lists a claimed job
+        /// after its claim expires (up to 2 minutes), which would otherwise
+        /// leave a known-good result undelivered for that whole window.
+        /// </summary>
+        private async Task FlushPendingResults()
+        {
+            List<OperationRecord> pending;
+            try
+            {
+                pending = _ledger.GetOperationsByState("result_pending");
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to read pending results from ledger");
+                return;
+            }
+
+            foreach (var op in pending)
+            {
+                if (_completedIdempotencyKeys.Contains(op.IdempotencyKey))
+                    continue;
+                await RetryResultDelivery(op);
             }
         }
 
@@ -240,11 +316,16 @@ namespace SageBridge.Connector
                                 existingOp.SageRecordId);
                             return;
 
+                        case "result_pending":
+                            Log.Information("Operation result pending cloud ack - retrying delivery");
+                            await RetryResultDelivery(existingOp);
+                            return;
+
                         case "processing":
                             Log.Warning("Operation in processing state - reconciling with Sage");
-                            if (existingOp.Action == "quote.create")
+                            if (existingOp.Action == "quote.create" || existingOp.Action == "invoice.create")
                             {
-                                ReconcileUncertainQuote(existingOp);
+                                ReconcileUncertainNumberedDocument(existingOp);
                                 return;
                             }
 
@@ -300,6 +381,7 @@ namespace SageBridge.Connector
                 object result = null;
                 string error = null;
                 string status = "succeeded";
+                string sageId = null;
 
                 try
                 {
@@ -313,13 +395,26 @@ namespace SageBridge.Connector
                             result = await HandleCreateQuote(job.Payload);
                             break;
 
+                        case "invoice.create":
+                            result = await HandleCreateInvoice(job.Payload);
+                            break;
+
                         default:
                             throw new NotImplementedException($"Action not implemented: {job.Action}");
                     }
 
-                    var sageId = ((dynamic)result).Id;
+                    sageId = ((dynamic)result).Id;
                     _ledger.UpdateSageRecordId(idempotencyKey, companyId, sageId);
-                    Log.Information("Saved Sage record ID {Id} to ledger", sageId);
+                    // The Sage write is now durably known-successful. Mark
+                    // result_pending (not succeeded) until the cloud actually
+                    // confirms it - this is the boundary that protects the
+                    // "Post() succeeds, connection drops before the cloud
+                    // hears about it" case: on any interruption from here on,
+                    // restart-time reconciliation and the poll loop's
+                    // FlushPendingResults retry delivery using this same
+                    // SageRecordId, and never call the Sage SDK again for it.
+                    _ledger.MarkResultPending(idempotencyKey, companyId);
+                    Log.Information("Saved Sage record ID {Id} to ledger; cloud ack pending", sageId);
                 }
                 catch (Exception ex)
                 {
@@ -329,13 +424,20 @@ namespace SageBridge.Connector
                     _ledger.MarkFailed(idempotencyKey, companyId);
                 }
 
-                await SubmitJobResult(job.JobId, status, result, error);
+                var delivered = await SubmitJobResult(job.JobId, status, sageId, error);
 
                 if (status == "succeeded")
                 {
-                    _ledger.MarkSucceeded(idempotencyKey, companyId);
-                    _completedIdempotencyKeys.Add(idempotencyKey);
-                    Log.Information("IdempotencyKey {Key} recorded as succeeded", idempotencyKey);
+                    if (delivered)
+                    {
+                        _ledger.MarkSucceeded(idempotencyKey, companyId);
+                        _completedIdempotencyKeys.Add(idempotencyKey);
+                        Log.Information("IdempotencyKey {Key} recorded as succeeded", idempotencyKey);
+                    }
+                    else
+                    {
+                        Log.Warning("Cloud did not confirm the result for {Key} yet - will retry delivery", idempotencyKey);
+                    }
                 }
             }
             catch (Exception ex)
@@ -434,6 +536,64 @@ namespace SageBridge.Connector
             return result;
         }
 
+        /// <summary>
+        /// Narrow supported sales invoice: a customer plus one or more
+        /// existing Sage items, validated identically to quote.create. Sage
+        /// assigns the actual invoice number/id on Post(); it is read back
+        /// via SageService.CreateInvoiceAsync rather than pre-generated like
+        /// a quote's OrderQuoteNum.
+        /// </summary>
+        private async Task<object> HandleCreateInvoice(JObject payload)
+        {
+            var customerId = payload["customerId"]?.ToString();
+            if (string.IsNullOrWhiteSpace(customerId))
+                throw new ArgumentException("customerId is required.");
+
+            var linesToken = payload["lines"];
+            if (linesToken == null || linesToken.Type != JTokenType.Array)
+                throw new ArgumentException("lines is required and must be an array.");
+
+            var lines = linesToken.ToObject<List<QuoteLineRequest>>();
+            if (lines == null)
+                throw new ArgumentException("lines could not be parsed.");
+
+            if (lines.Count < 1 || lines.Count > 100)
+                throw new ArgumentException("lines must contain between 1 and 100 entries.");
+
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line.Sku))
+                    throw new ArgumentException("Each line must include a non-empty sku.");
+
+                if (line.Quantity <= 0)
+                    throw new ArgumentException(
+                        $"Line for sku '{line.Sku}' has an invalid quantity. Quantity must be greater than 0.");
+
+                if (line.UnitPrice < 0)
+                    throw new ArgumentException(
+                        $"Line for sku '{line.Sku}' has an invalid unitPrice. Unit price must be greater than or equal to 0.");
+            }
+
+            var customerName = await _sageService.ResolveCustomerNameAsync(customerId);
+            if (string.IsNullOrWhiteSpace(customerName))
+                throw new ArgumentException(
+                    $"No Sage customer found for customerId '{customerId}'.", "customerId");
+
+            foreach (var line in lines)
+            {
+                var product = await _sageService.GetProductBySkuAsync(line.Sku);
+                if (product == null)
+                    throw new ArgumentException(
+                        $"Sage has no active or inactive item with sku '{line.Sku}'.", "lines");
+            }
+
+            Log.Information("Creating sales invoice for customerId {CustomerId}", customerId);
+
+            var result = await _sageService.CreateInvoiceAsync(customerId, lines);
+
+            return result;
+        }
+
         private async Task MarkJobStarted(string jobId)
         {
             try
@@ -446,22 +606,40 @@ namespace SageBridge.Connector
             }
         }
 
-        private async Task SubmitJobResult(string jobId, string status, object result, string error)
+        /// <summary>
+        /// Submits a job's terminal result to the cloud. The cloud API
+        /// expects {status, sageId, error} - NOT the raw Sage result object -
+        /// and requires a non-empty sageId for a 'succeeded' result. Returns
+        /// true only when the cloud actually acknowledged the result (2xx,
+        /// which the API also returns for an idempotent replay of an
+        /// already-recorded matching result); returns false on any network
+        /// failure or rejection so the caller knows to retry later without
+        /// re-running the Sage write.
+        /// </summary>
+        private async Task<bool> SubmitJobResult(string jobId, string status, string sageId, string error)
         {
             try
             {
                 var resultData = new
                 {
                     status,
-                    result,
+                    sageId,
                     error
                 };
 
-                await _auth.PostAsync($"/connector/jobs/{jobId}/result", resultData);
+                var response = await _auth.PostAsync($"/connector/jobs/{jobId}/result", resultData);
+                if (response.IsSuccessStatusCode)
+                    return true;
+
+                var body = await response.Content.ReadAsStringAsync();
+                Log.Warning("Cloud did not accept job result for {JobId}: {StatusCode} {Body}",
+                    jobId, response.StatusCode, body);
+                return false;
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Error submitting job result");
+                Log.Error(ex, "Error submitting job result for {JobId}", jobId);
+                return false;
             }
         }
 

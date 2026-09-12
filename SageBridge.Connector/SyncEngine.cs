@@ -86,20 +86,20 @@ namespace SageBridge.Connector
                 var quotes = await _sageService.GetQuotesAsync();
                 await PostToCloudAsync("/sync/quotes", new
                 {
-                    tenantId = _config.TenantId,
-                    companyId = _config.CompanyId,
-                    quotes = quotes,
-                    timestamp = DateTime.UtcNow
+                    TenantId = _config.TenantId,
+                    CompanyId = _config.CompanyId,
+                    Quotes = quotes,
+                    Timestamp = DateTime.UtcNow
                 });
 
                 // Sync invoice summary
                 var invoiceSummary = await _sageService.GetInvoiceSummaryAsync();
                 await PostToCloudAsync("/sync/invoice-summary", new
                 {
-                    tenantId = _config.TenantId,
-                    companyId = _config.CompanyId,
-                    summary = invoiceSummary,
-                    timestamp = DateTime.UtcNow
+                    TenantId = _config.TenantId,
+                    CompanyId = _config.CompanyId,
+                    InvoiceSummary = invoiceSummary,
+                    Timestamp = DateTime.UtcNow
                 });
 
                 Log.Information("✓ Sync completed successfully");

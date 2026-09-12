@@ -433,6 +433,149 @@ namespace SageBridge.Connector
         }
 
         /// <summary>
+        /// Create a narrow sales invoice in Sage: a customer plus one or
+        /// more existing items, following the same SalesJournal SDK pattern
+        /// as CreateQuoteAsync (OpenSalesJournal; SelectTransType;
+        /// SelectAPARLedger; SetShipDate(GetJournalDate()); per-line
+        /// SetItemNumber/SetOrdered/SetPrice; Post(); CloseSalesJournal in
+        /// finally). Does not set tax manually and does not set revenue
+        /// accounts unless the SDK forces it - identical scope to
+        /// CreateQuoteAsync's write path.
+        ///
+        /// UNVERIFIED AGAINST THE REAL SDK: SelectTransType(0) is used here
+        /// as the standard SimplySDK "Invoice/Sale" transaction type,
+        /// consistent with the 0=Invoice/1=Order/2=Quote sequence this file
+        /// already relies on for quotes (CreateQuoteAsync uses
+        /// SelectTransType(2)). This has not been compiled or run against
+        /// the installed Sage 50 Canada SDK. Confirm the exact transaction
+        /// type value - and that no other required field differs for a
+        /// plain invoice versus a quote/order - on the Windows connector
+        /// machine with the real SDK before relying on this in production.
+        ///
+        /// Unlike a quote, an invoice number is not pre-assigned by the
+        /// connector: Sage assigns it on Post(). Once Post() returns true
+        /// the write is durable and MUST NOT be retried, so - exactly like
+        /// CreateCustomerAsync - any failure reading the identifier back
+        /// degrades to an empty Id rather than throwing (throwing here would
+        /// be misread upstream as "the write failed" and trigger a retry,
+        /// which would double-post the invoice).
+        /// </summary>
+        public async Task<object> CreateInvoiceAsync(
+            string customerId,
+            List<QuoteLineRequest> lines)
+        {
+            if (lines == null || lines.Count == 0)
+                throw new ArgumentException("At least one invoice line is required.", nameof(lines));
+
+            string? customerName = await ResolveCustomerNameAsync(customerId);
+            if (string.IsNullOrWhiteSpace(customerName))
+                throw new ArgumentException(
+                    $"No Sage customer found for id '{customerId}'.", nameof(customerId));
+
+            Log.Information(
+                "Creating sales invoice for Sage customer {CustomerId} ({CustomerName})",
+                customerId, customerName);
+
+            SalesJournal salJourn = null;
+            try
+            {
+                salJourn = SDKInstanceManager.Instance.OpenSalesJournal();
+                try
+                {
+                    salJourn.SelectTransType(0); // invoice/sale - see UNVERIFIED note above
+                }
+                catch (SimplyNoAccessException ex)
+                {
+                    throw new InvalidOperationException(
+                        "Sales invoices are not enabled in this Sage company. " +
+                        "Enable them in Sage 50 before creating invoices.", ex);
+                }
+
+                salJourn.SelectAPARLedger(customerName);
+                salJourn.SetShipDate(salJourn.GetJournalDate());
+
+                int lineIndex = 0;
+                foreach (var line in lines)
+                {
+                    lineIndex++;
+                    salJourn.SetItemNumber(line.Sku, lineIndex);
+                    salJourn.SetOrdered((double)line.Quantity, lineIndex);
+                    salJourn.SetPrice((double)line.UnitPrice, lineIndex);
+                }
+
+                bool posted = salJourn.Post();
+                if (!posted)
+                    throw new InvalidOperationException(
+                        $"Sage accepted the invoice setup but Post() returned false for customer '{customerName}'.");
+
+                Log.Information(
+                    "Sales invoice posted in Sage 50 for customer {CustomerName}",
+                    customerName);
+            }
+            finally
+            {
+                if (salJourn != null)
+                    SDKInstanceManager.Instance.CloseSalesJournal();
+            }
+
+            // Post() has committed the write; nothing below this point may
+            // throw out of this method. Best-effort read-back only.
+            string id = string.Empty;
+            string invoiceNumber = string.Empty;
+            try
+            {
+                var created = await _invoiceRepository.FindLastCreatedInvoiceAsync(customerName);
+                if (created != null)
+                {
+                    id = created.Id;
+                    invoiceNumber = created.InvoiceNumber;
+                }
+                else
+                {
+                    Log.Warning(
+                        "Invoice for {CustomerName} posted in Sage but could not be read back immediately after Post(). " +
+                        "Verify manually in Sage 50 - do NOT retry this idempotency key, the write already succeeded.",
+                        customerName);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex,
+                    "Invoice for {CustomerName} posted in Sage but the read-back query failed. " +
+                    "Verify manually in Sage 50 - do NOT retry this idempotency key, the write already succeeded.",
+                    customerName);
+            }
+
+            return new
+            {
+                Id = id,
+                CustomerId = customerId,
+                CustomerName = customerName,
+                InvoiceNumber = invoiceNumber,
+                LineCount = lines.Count
+            };
+        }
+
+        /// <summary>
+        /// Reconcile an uncertain invoice.create by checking whether an
+        /// invoice with the given Sage record id already exists.
+        /// Synchronous version for backward compatibility.
+        /// </summary>
+        public bool InvoiceExistsInSage(string invoiceId)
+        {
+            return Task.Run(() => InvoiceExistsInSageAsync(invoiceId)).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// Async version of invoice existence check.
+        /// Delegates to the invoice repository which encapsulates Sage internal schema details.
+        /// </summary>
+        public async Task<bool> InvoiceExistsInSageAsync(string invoiceId)
+        {
+            return await _invoiceRepository.InvoiceExistsAsync(invoiceId);
+        }
+
+        /// <summary>
         /// Reconcile an uncertain quote by checking whether a quote with the
         /// given number already exists in Sage.
         /// Synchronous version for backward compatibility.

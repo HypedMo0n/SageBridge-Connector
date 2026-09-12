@@ -336,6 +336,80 @@ WHERE h.nTranType = 0";
             };
         }
 
+        /// <summary>
+        /// Check if an invoice with the given Sage record id (lId) exists.
+        /// Used for reconciliation after an interruption between Post() and
+        /// the ledger recording delivery - never for anything user-supplied.
+        /// Uses tCusTr table with nTranType=0 (Sage 50 Canada 2026 internal schema).
+        /// </summary>
+        public async Task<bool> InvoiceExistsAsync(string invoiceId)
+        {
+            if (string.IsNullOrWhiteSpace(invoiceId) || !long.TryParse(invoiceId.Trim(), out var numericId))
+                return false;
+
+            var sql = $@"
+SELECT COUNT(*) as cnt
+FROM tCusTr
+WHERE nTranType = 0 AND lId = {numericId}";
+
+            var table = await Task.Run(() => _sageService.Select(sql));
+
+            if (table.Rows.Count == 0)
+                return false;
+
+            return Convert.ToInt32(table.Rows[0]["cnt"]) > 0;
+        }
+
+        /// <summary>
+        /// Find the most recently created invoice for a customer. Called
+        /// immediately after Post() (still holding no further SDK lock) to
+        /// read back the Sage-assigned invoice identifier, the same way
+        /// SageCustomerRepository.FindLastCreatedCustomerAsync retrieves a
+        /// new customer's id.
+        /// Uses tCusTr table with nTranType=0 (Sage 50 Canada 2026 internal schema).
+        /// </summary>
+        public async Task<InvoiceRecord?> FindLastCreatedInvoiceAsync(string customerName)
+        {
+            if (string.IsNullOrWhiteSpace(customerName))
+                return null;
+
+            var sql = $@"
+SELECT h.lId, h.lCusId, c.sName AS sCustomerName, h.sSource,
+       h.dtDate, h.dPreTaxAmt, h.sRef,
+       COALESCE((
+           SELECT d.dAmtOwg FROM tCusTrDt d
+           WHERE d.lCusTrId = h.lId
+           ORDER BY d.lId DESC LIMIT 1
+       ), 0) AS dBalance
+FROM tCusTr h
+INNER JOIN tCustomr c ON c.lId = h.lCusId
+WHERE h.nTranType = 0 AND c.sName = '{SanitizeSql(customerName.Trim())}'
+ORDER BY h.lId DESC
+LIMIT 1";
+
+            var table = await Task.Run(() => _sageService.Select(sql));
+
+            if (table.Rows.Count == 0)
+                return null;
+
+            var row = table.Rows[0];
+            decimal total = GetDecimal(row, "dPreTaxAmt");
+            decimal balance = GetDecimal(row, "dBalance");
+            return new InvoiceRecord
+            {
+                Id = GetText(row, "lId"),
+                CustomerId = GetText(row, "lCusId"),
+                CustomerName = GetText(row, "sCustomerName"),
+                InvoiceNumber = GetText(row, "sSource"),
+                Reference = GetText(row, "sRef"),
+                Date = GetNullableDate(row, "dtDate"),
+                PreTaxTotal = total,
+                Total = total,
+                Balance = balance,
+                Status = balance == 0m ? "Paid" : "Unpaid"
+            };
+        }
+
         // Helper methods for safe data access
         private static string GetText(DataRow row, string column)
         {
@@ -353,6 +427,11 @@ WHERE h.nTranType = 0";
         {
             object value = row[column];
             return value == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(value);
+        }
+
+        private static string SanitizeSql(string value)
+        {
+            return value.Replace("'", "''");
         }
     }
 }

@@ -13,6 +13,13 @@ namespace SageBridge.Connector
     {
         Pending,
         Processing,
+        /// <summary>
+        /// The Sage SDK write succeeded and SageRecordId is known, but the
+        /// cloud has not yet confirmed receiving the terminal job result
+        /// (network/process interruption between Post() and the cloud ack).
+        /// Safe to retry submitting the same result; never re-run the write.
+        /// </summary>
+        ResultPending,
         Succeeded,
         Failed,
         Uncertain
@@ -195,6 +202,28 @@ namespace SageBridge.Connector
                     WHERE idempotency_key = @key AND company_id = @company
                 ", _connection);
                 cmd.Parameters.AddWithValue("@sageId", sageRecordId);
+                cmd.Parameters.AddWithValue("@key", idempotencyKey);
+                cmd.Parameters.AddWithValue("@company", companyId);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// The Sage write is confirmed done (SageRecordId is already set via
+        /// UpdateSageRecordId) but the cloud has not yet acknowledged the
+        /// terminal result. Distinct from 'processing' so a restart's
+        /// reconciliation retries delivering the known result instead of
+        /// re-checking Sage for existence.
+        /// </summary>
+        public void MarkResultPending(string idempotencyKey, string companyId)
+        {
+            lock (_lock)
+            {
+                using var cmd = new SQLiteCommand(@"
+                    UPDATE operation_ledger
+                    SET state = 'result_pending'
+                    WHERE idempotency_key = @key AND company_id = @company
+                ", _connection);
                 cmd.Parameters.AddWithValue("@key", idempotencyKey);
                 cmd.Parameters.AddWithValue("@company", companyId);
                 cmd.ExecuteNonQuery();

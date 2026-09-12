@@ -28,6 +28,8 @@ namespace SageBridge.Tests
                 TestQuoteCreationUsesSdk();
                 TestInvoiceCreationUsesSdk();
                 TestNoSqlWrites();
+                TestJobResultContract();
+                TestSyncFieldNames();
             }
             catch (Exception ex)
             {
@@ -213,9 +215,53 @@ namespace SageBridge.Tests
             Console.WriteLine("\n7. Invoice creation uses SDK");
 
             var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
-            // Invoice creation is not yet implemented, but verify no direct SQL writes exist
+            Assert(sageService.Contains("public async Task<object> CreateInvoiceAsync"), "CreateInvoiceAsync exists");
+            Assert(sageService.Contains("SDKInstanceManager.Instance.OpenSalesJournal()"), "Invoice creation uses SDK OpenSalesJournal");
+            // Invoice creation must never re-throw after Post() succeeds - a thrown
+            // exception there would be misread as "the write failed" upstream and
+            // trigger a retry that double-posts the invoice.
+            Assert(sageService.Contains("degrades to an empty Id rather than throwing"), "CreateInvoiceAsync documents the no-throw-after-Post() safety requirement");
             Assert(!sageService.Contains("INSERT INTO tCusTr"), "No direct INSERT into tCusTr");
             Assert(!sageService.Contains("UPDATE tCusTr"), "No direct UPDATE of tCusTr");
+        }
+
+        // ---------------------------------------------------------------------------
+        // 9. JobPoller submits {status, sageId, error} to the cloud, not the
+        //    raw Sage result object, and never marks an operation succeeded
+        //    without a confirmed cloud acknowledgement.
+        // ---------------------------------------------------------------------------
+        static void TestJobResultContract()
+        {
+            Console.WriteLine("\n9. Job result cloud contract");
+
+            var jobPoller = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\JobPoller.cs");
+            Assert(System.Text.RegularExpressions.Regex.IsMatch(jobPoller, @"new\s*\{\s*status,\s*sageId,\s*error\s*\}"),
+                "SubmitJobResult sends {status, sageId, error} matching the cloud API contract");
+            Assert(!System.Text.RegularExpressions.Regex.IsMatch(jobPoller, @"new\s*\{\s*status,\s*result,\s*error\s*\}"),
+                "SubmitJobResult no longer sends the raw Sage result object as 'result'");
+            Assert(jobPoller.Contains("private async Task<bool> SubmitJobResult"), "SubmitJobResult reports delivery success/failure to its caller");
+            Assert(jobPoller.Contains("MarkResultPending"), "JobPoller uses the result_pending ledger state before a cloud ack is confirmed");
+            Assert(jobPoller.Contains("case \"result_pending\":"), "ProcessJob retries delivery for result_pending operations");
+            Assert(jobPoller.Contains("FlushPendingResults"), "JobPoller proactively retries undelivered results every poll tick");
+            Assert(jobPoller.Contains("case \"invoice.create\":"), "JobPoller dispatches invoice.create jobs");
+            Assert(jobPoller.Contains("HandleCreateInvoice"), "JobPoller has an invoice.create handler");
+        }
+
+        // ---------------------------------------------------------------------------
+        // 10. SyncEngine sends the field names the cloud API actually expects
+        //     for quote and invoice-summary sync (regression guard: these two
+        //     were previously sent in camelCase and were silently rejected by
+        //     every real sync attempt).
+        // ---------------------------------------------------------------------------
+        static void TestSyncFieldNames()
+        {
+            Console.WriteLine("\n10. Sync payload field names match the cloud API");
+
+            var syncEngine = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SyncEngine.cs");
+            Assert(syncEngine.Contains("Quotes = quotes"), "/sync/quotes sends 'Quotes' (capitalized) matching sync.ts's body.Quotes");
+            Assert(syncEngine.Contains("InvoiceSummary = invoiceSummary"), "/sync/invoice-summary sends 'InvoiceSummary' matching sync.ts's body.InvoiceSummary");
+            Assert(!System.Text.RegularExpressions.Regex.IsMatch(syncEngine, @"\bquotes\s*=\s*quotes\b"), "no lowercase 'quotes' sync field remains");
+            Assert(!syncEngine.Contains("summary = invoiceSummary"), "no lowercase 'summary' sync field remains");
         }
 
         // ---------------------------------------------------------------------------
