@@ -201,6 +201,7 @@ namespace SageBridge.Connector
                 i.InvoiceNumber,
                 i.Reference,
                 i.Date,
+                i.DueDate,
                 i.PreTaxTotal,
                 i.Total,
                 i.Balance,

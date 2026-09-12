@@ -32,6 +32,7 @@ namespace SageBridge.Connector
         public string InvoiceNumber { get; set; }
         public string Reference { get; set; }
         public DateTime? Date { get; set; }
+        public DateTime? DueDate { get; set; }
         public decimal PreTaxTotal { get; set; }
         public decimal Total { get; set; }
         public decimal Balance { get; set; }

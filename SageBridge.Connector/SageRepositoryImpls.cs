@@ -195,6 +195,38 @@ WHERE bQuote = 1 AND sSONum = '{SanitizeSql(quoteNumber.Trim())}'";
         /// <summary>
         /// Get all invoices from Sage.
         /// Uses tCusTr table with nTranType=0 (Sage 50 Canada 2026 internal schema).
+        ///
+        /// Balance calculation: previously this took the latest tCusTrDt.dAmtOwg
+        /// row scoped to the invoice's own lId. That is very likely wrong -
+        /// GetARAgingAsync (below) proves this codebase's own understanding of
+        /// the schema is that receipts and credit memos are separate tCusTr
+        /// transactions (nTranType 1/2), each with their own lId and their own
+        /// tCusTrDt distribution rows - not child rows of the original invoice.
+        /// A query scoped to `tCusTrDt WHERE lCusTrId = h.lId` (h = the invoice)
+        /// would therefore only ever see the invoice's OWN distribution lines,
+        /// never a later payment, so "the latest dAmtOwg row" for a paid-off
+        /// invoice would still reflect its original amount forever. That
+        /// matches a real, reported bug: a dashboard total far larger than
+        /// actual receivables, entirely attributable to paid invoices still
+        /// contributing their full historical amount.
+        ///
+        /// Fixed to use the same transaction-netting basis as GetARAgingAsync
+        /// (SUM invoices minus SUM receipts/credits for the customer, treating
+        /// nTranType 0 as a charge and 1/2 as a reduction) instead of a second,
+        /// inconsistent mechanism. Because Sage's schema does not give this
+        /// connector a proven way to attribute a specific receipt to a specific
+        /// invoice, remaining balance is allocated FIFO across the customer's
+        /// invoices, oldest first - the standard approach when explicit
+        /// per-invoice payment application isn't available. This guarantees
+        /// SUM(all invoice balances for a customer) reconciles exactly to that
+        /// customer's net total from GetARAgingAsync's own proven formula; it
+        /// does not guess a new balance figure independently.
+        ///
+        /// UNVERIFIED AGAINST THE REAL SDK/DATA: this has not been run against
+        /// a live Sage 50 company. Confirm SUM(balance) here reconciles to
+        /// Sage 50's own A/R Aging / customer receivables report before
+        /// trusting it, and if Sage's schema does expose a genuine
+        /// receipt-to-invoice application link, prefer that over FIFO.
         /// </summary>
         public async Task<List<InvoiceRecord>> GetInvoicesAsync()
         {
@@ -204,11 +236,13 @@ WHERE bQuote = 1 AND sSONum = '{SanitizeSql(quoteNumber.Trim())}'";
             const string sql = @"
 SELECT h.lId, h.lCusId, c.sName AS sCustomerName, h.sSource,
        h.dtDate, h.dPreTaxAmt, h.sRef,
-       COALESCE((
-           SELECT d.dAmtOwg FROM tCusTrDt d
-           WHERE d.lCusTrId = h.lId
-           ORDER BY d.lId DESC LIMIT 1
-       ), 0) AS dBalance
+       GREATEST(0, LEAST(h.dPreTaxAmt,
+           (SELECT COALESCE(SUM(h2.dPreTaxAmt), 0) FROM tCusTr h2
+            WHERE h2.lCusId = h.lCusId AND h2.nTranType = 0 AND h2.lId <= h.lId)
+           -
+           (SELECT COALESCE(SUM(h3.dPreTaxAmt), 0) FROM tCusTr h3
+            WHERE h3.lCusId = h.lCusId AND h3.nTranType IN (1, 2))
+       )) AS dBalance
 FROM tCusTr h
 INNER JOIN tCustomr c ON c.lId = h.lCusId
 WHERE h.nTranType = 0
@@ -217,18 +251,40 @@ ORDER BY h.dtDate DESC, h.lId DESC";
             var invoices = new List<InvoiceRecord>();
             var table = await Task.Run(() => _sageService.Select(sql));
 
+            // Due dates are fetched separately and defensively: dtDueDate's
+            // exact column name is UNVERIFIED against the real schema (it was
+            // never selected at all before this fix, which is why every
+            // invoice fell into a single "Current" aging bucket regardless of
+            // actual age). If the column name is wrong, invoice sync must
+            // still succeed with totals/balances intact - aging degrades to
+            // "unknown due date" rather than the whole sync failing.
+            var dueDates = new Dictionary<string, DateTime?>();
+            try
+            {
+                const string dueDateSql = "SELECT lId, dtDueDate FROM tCusTr WHERE nTranType = 0";
+                var dueDateTable = await Task.Run(() => _sageService.Select(dueDateSql));
+                foreach (DataRow row in dueDateTable.Rows)
+                    dueDates[GetText(row, "lId")] = GetNullableDate(row, "dtDueDate");
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Could not read invoice due dates - confirm the real due-date column name against the installed Sage 50 SDK/schema. Aging will show every open invoice as unaged until this is fixed.");
+            }
+
             foreach (DataRow row in table.Rows)
             {
                 decimal total = GetDecimal(row, "dPreTaxAmt");
                 decimal balance = GetDecimal(row, "dBalance");
+                var id = GetText(row, "lId");
                 invoices.Add(new InvoiceRecord
                 {
-                    Id = GetText(row, "lId"),
+                    Id = id,
                     CustomerId = GetText(row, "lCusId"),
                     CustomerName = GetText(row, "sCustomerName"),
                     InvoiceNumber = GetText(row, "sSource"),
                     Reference = GetText(row, "sRef"),
                     Date = GetNullableDate(row, "dtDate"),
+                    DueDate = dueDates.TryGetValue(id, out var due) ? due : null,
                     PreTaxTotal = total,
                     Total = total,
                     Balance = balance,
@@ -297,30 +353,33 @@ ORDER BY c.sName";
         /// <summary>
         /// Get a summary of invoice totals by paid/unpaid status.
         /// Uses tCusTr table with nTranType=0 (Sage 50 Canada 2026 internal schema).
+        /// Paid/unpaid is derived from the same FIFO transaction-netting
+        /// balance as GetInvoicesAsync (see its remarks) rather than the
+        /// previous tCusTrDt.dAmtOwg lookup, so the two never disagree about
+        /// whether a given invoice is paid.
         /// </summary>
         public async Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync()
         {
             // Sage internal schema: tCusTr stores customer transactions.
             // nTranType=0 indicates an invoice.
-            // Balance is determined by the latest dAmtOwg value in tCusTrDt.
             const string sql = @"
-SELECT 
+SELECT
     COUNT(*) AS nCount,
     SUM(dPreTaxAmt) AS dTotal,
-    SUM(CASE WHEN (
-                    SELECT COALESCE(d2.dAmtOwg, 0) 
-                    FROM tCusTrDt d2 
-                    WHERE d2.lCusTrId = h.lId 
-                    ORDER BY d2.lId DESC 
-                    LIMIT 1
-                ) = 0 THEN 1 ELSE 0 END) AS nPaid,
-    SUM(CASE WHEN (
-                    SELECT COALESCE(d2.dAmtOwg, 0) 
-                    FROM tCusTrDt d2 
-                    WHERE d2.lCusTrId = h.lId 
-                    ORDER BY d2.lId DESC 
-                    LIMIT 1
-                ) <> 0 THEN 1 ELSE 0 END) AS nUnpaid
+    SUM(CASE WHEN GREATEST(0, LEAST(h.dPreTaxAmt,
+                    (SELECT COALESCE(SUM(h2.dPreTaxAmt), 0) FROM tCusTr h2
+                     WHERE h2.lCusId = h.lCusId AND h2.nTranType = 0 AND h2.lId <= h.lId)
+                    -
+                    (SELECT COALESCE(SUM(h3.dPreTaxAmt), 0) FROM tCusTr h3
+                     WHERE h3.lCusId = h.lCusId AND h3.nTranType IN (1, 2))
+                )) = 0 THEN 1 ELSE 0 END) AS nPaid,
+    SUM(CASE WHEN GREATEST(0, LEAST(h.dPreTaxAmt,
+                    (SELECT COALESCE(SUM(h2.dPreTaxAmt), 0) FROM tCusTr h2
+                     WHERE h2.lCusId = h.lCusId AND h2.nTranType = 0 AND h2.lId <= h.lId)
+                    -
+                    (SELECT COALESCE(SUM(h3.dPreTaxAmt), 0) FROM tCusTr h3
+                     WHERE h3.lCusId = h.lCusId AND h3.nTranType IN (1, 2))
+                )) <> 0 THEN 1 ELSE 0 END) AS nUnpaid
 FROM tCusTr h
 WHERE h.nTranType = 0";
 
