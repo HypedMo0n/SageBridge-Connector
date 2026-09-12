@@ -30,6 +30,7 @@ namespace SageBridge.Tests
                 TestNoSqlWrites();
                 TestJobResultContract();
                 TestSyncFieldNames();
+                TestProvisioningReportedFromSync();
             }
             catch (Exception ex)
             {
@@ -262,6 +263,36 @@ namespace SageBridge.Tests
             Assert(syncEngine.Contains("InvoiceSummary = invoiceSummary"), "/sync/invoice-summary sends 'InvoiceSummary' matching sync.ts's body.InvoiceSummary");
             Assert(!System.Text.RegularExpressions.Regex.IsMatch(syncEngine, @"\bquotes\s*=\s*quotes\b"), "no lowercase 'quotes' sync field remains");
             Assert(!syncEngine.Contains("summary = invoiceSummary"), "no lowercase 'summary' sync field remains");
+        }
+
+        // ---------------------------------------------------------------------------
+        // 11. Regression guard for the provisioning-stuck-at-10% bug: the
+        //     connector previously never called /connector/provisioning at
+        //     all, so a paired, heartbeating, fully-synced connector left
+        //     the UI showing "Connector connected" / 10% forever. SyncEngine
+        //     must drive the state machine from actual sync progress, and a
+        //     sync failure must report 'failed', never leave the state
+        //     looking like it's progressing toward ready on its own.
+        // ---------------------------------------------------------------------------
+        static void TestProvisioningReportedFromSync()
+        {
+            Console.WriteLine("\n11. Sync engine drives the provisioning state machine");
+
+            var syncEngine = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SyncEngine.cs");
+            Assert(syncEngine.Contains("/connector/provisioning"), "SyncEngine reports provisioning progress to the cloud");
+
+            foreach (var state in new[] { "company_selected", "provisioning", "syncing_customers", "syncing_invoices", "syncing_products", "syncing_quotes", "finalizing", "ready" })
+            {
+                Assert(syncEngine.Contains($"\"{state}\""), $"SyncEngine reports provisioning state '{state}'");
+            }
+
+            Assert(syncEngine.Contains("ReportProvisioningAsync(\"failed\""),
+                "A sync failure reports the provisioning state as failed, not silently left as-is or reported ready");
+
+            int customersIdx = syncEngine.IndexOf("\"syncing_customers\"");
+            int readyIdx = syncEngine.IndexOf("\"ready\"");
+            Assert(customersIdx >= 0 && readyIdx >= 0 && customersIdx < readyIdx,
+                "syncing_customers is reported before ready (actual progress order, not simulated)");
         }
 
         // ---------------------------------------------------------------------------
