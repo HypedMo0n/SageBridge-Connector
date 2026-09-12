@@ -30,6 +30,7 @@ namespace SageBridge.Connector
                 var apiServer = new ApiServer(config, sageService);
                 var syncEngine = new SyncEngine(config, sageService);
                 var tunnelManager = new CloudflareTunnelManager(config);
+                var heartbeatSender = new HeartbeatSender(config, sageService);
 
                 // Handle pairing mode
                 if (args.Length > 0 && args[0] == "--pair")
@@ -84,6 +85,11 @@ namespace SageBridge.Connector
                 jobPoller.Start();
                 Log.Information("✓ Job poller started (polling for write operations)");
 
+                // Start heartbeat (keeps companies.last_seen_at fresh so the
+                // UI's online/offline indicator reflects reality)
+                heartbeatSender.Start();
+                Log.Information("✓ Heartbeat started (every 30s)");
+
                 Log.Information("");
                 Log.Information("═══════════════════════════════════════");
                 Log.Information("Connector is LIVE! Available endpoints:");
@@ -119,6 +125,7 @@ namespace SageBridge.Connector
 
                 syncEngine.Stop();
                 jobPoller.Stop();
+                heartbeatSender.Stop();
                 apiServer.Stop();
                 Log.Information("Connector stopped cleanly");
             }

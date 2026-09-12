@@ -31,6 +31,7 @@ namespace SageBridge.Tests
                 TestJobResultContract();
                 TestSyncFieldNames();
                 TestProvisioningReportedFromSync();
+                TestHeartbeatWired();
             }
             catch (Exception ex)
             {
@@ -266,13 +267,17 @@ namespace SageBridge.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // 11. Regression guard for the provisioning-stuck-at-10% bug: the
-        //     connector previously never called /connector/provisioning at
-        //     all, so a paired, heartbeating, fully-synced connector left
-        //     the UI showing "Connector connected" / 10% forever. SyncEngine
-        //     must drive the state machine from actual sync progress, and a
-        //     sync failure must report 'failed', never leave the state
-        //     looking like it's progressing toward ready on its own.
+        // 11. Regression guard for the provisioning-stuck-at-10% bug and its
+        //     follow-on 409 bug: the connector previously never called
+        //     /connector/provisioning at all, and once it did, it skipped
+        //     'checking_sage' - the ONLY legal transition out of
+        //     'connector_connected' per phase1.ts's NEXT table - so every
+        //     report in the chain 409'd (INVALID_PROVISIONING_TRANSITION)
+        //     starting from the very first one. SyncEngine must drive the
+        //     state machine from actual sync progress in the exact order the
+        //     cloud's FSM accepts, and a sync failure must report 'failed',
+        //     never leave the state looking like it's progressing toward
+        //     ready on its own.
         // ---------------------------------------------------------------------------
         static void TestProvisioningReportedFromSync()
         {
@@ -281,18 +286,64 @@ namespace SageBridge.Tests
             var syncEngine = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SyncEngine.cs");
             Assert(syncEngine.Contains("/connector/provisioning"), "SyncEngine reports provisioning progress to the cloud");
 
-            foreach (var state in new[] { "company_selected", "provisioning", "syncing_customers", "syncing_invoices", "syncing_products", "syncing_quotes", "finalizing", "ready" })
+            var canonicalOrder = new[] { "checking_sage", "company_selected", "provisioning", "syncing_customers", "syncing_invoices", "syncing_products", "syncing_quotes", "finalizing", "ready" };
+            foreach (var state in canonicalOrder)
             {
                 Assert(syncEngine.Contains($"\"{state}\""), $"SyncEngine reports provisioning state '{state}'");
             }
 
+            // The exact canonical sequence from phase1.ts's NEXT table must be
+            // reported in that order in source - this is what protects against
+            // regressing to a sequence that skips a step and 409s from the
+            // very first call.
+            var indices = canonicalOrder.Select(state => syncEngine.IndexOf($"\"{state}\"")).ToArray();
+            var inOrder = true;
+            for (int i = 1; i < indices.Length; i++)
+            {
+                if (indices[i - 1] < 0 || indices[i] < 0 || indices[i - 1] >= indices[i]) inOrder = false;
+            }
+            Assert(inOrder, "Provisioning states are reported in the exact canonical FSM order (checking_sage first)",
+                $"indices={string.Join(",", canonicalOrder.Zip(indices, (s, i) => $"{s}={i}"))}");
+
             Assert(syncEngine.Contains("ReportProvisioningAsync(\"failed\""),
                 "A sync failure reports the provisioning state as failed, not silently left as-is or reported ready");
+        }
 
-            int customersIdx = syncEngine.IndexOf("\"syncing_customers\"");
-            int readyIdx = syncEngine.IndexOf("\"ready\"");
-            Assert(customersIdx >= 0 && readyIdx >= 0 && customersIdx < readyIdx,
-                "syncing_customers is reported before ready (actual progress order, not simulated)");
+        // ---------------------------------------------------------------------------
+        // 12. Regression guard: live testing found zero heartbeat
+        //     implementation, so companies.last_seen_at (what the UI's
+        //     online/offline indicator reads) went stale even while the
+        //     connector was actively syncing (/sync/* only touches
+        //     last_sync_at). Heartbeat must reuse the cloud's existing
+        //     /connector/heartbeat endpoint via the same per-connector
+        //     machine credential already used for jobs/sync - not
+        //     /connector/jobs polling, and not a new mechanism - on an
+        //     interval well below the server's 120s staleness threshold,
+        //     and must never be able to crash sync/job processing.
+        // ---------------------------------------------------------------------------
+        static void TestHeartbeatWired()
+        {
+            Console.WriteLine("\n12. Heartbeat is wired to the existing cloud endpoint");
+
+            var heartbeatSender = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\HeartbeatSender.cs");
+            Assert(heartbeatSender.Contains("/connector/heartbeat"), "HeartbeatSender posts to the existing /connector/heartbeat endpoint");
+            Assert(heartbeatSender.Contains("CloudAuthenticator"), "HeartbeatSender authenticates with the per-connector machine credential, not a human/Firebase identity");
+            Assert(!heartbeatSender.Contains("/connector/jobs"), "Heartbeat does not piggyback on job polling as an implicit heartbeat");
+
+            var intervalMatch = System.Text.RegularExpressions.Regex.Match(heartbeatSender, @"IntervalSeconds\s*=\s*(\d+)");
+            Assert(intervalMatch.Success, "HeartbeatSender defines an explicit interval constant");
+            if (intervalMatch.Success)
+            {
+                int interval = int.Parse(intervalMatch.Groups[1].Value);
+                Assert(interval > 0 && interval < 120, $"Heartbeat interval ({interval}s) is significantly below the 120s staleness threshold", $"interval={interval}");
+            }
+
+            Assert(heartbeatSender.Contains("catch (Exception"), "Heartbeat failures are caught locally and cannot crash sync/job processing");
+
+            var program = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\Program.cs");
+            Assert(program.Contains("new HeartbeatSender("), "Program.cs instantiates HeartbeatSender");
+            Assert(program.Contains("heartbeatSender.Start()"), "Program.cs starts the heartbeat sender");
+            Assert(program.Contains("heartbeatSender.Stop()"), "Program.cs stops the heartbeat sender on shutdown");
         }
 
         // ---------------------------------------------------------------------------

@@ -62,6 +62,15 @@ namespace SageBridge.Connector
                 // connector restarts and partial previous failures - the
                 // source of truth is always "what did we just actually sync",
                 // never a local flag or simulated timer.
+                //
+                // NEXT['connector_connected'] only allows 'checking_sage' (see
+                // phase1.ts) - this must be reported first. Skipping straight
+                // to 'company_selected' (as an earlier version of this file
+                // did) is rejected with 409 INVALID_PROVISIONING_TRANSITION
+                // from connector_connected, which is exactly the bug this
+                // fixes: every report in the chain 409'd because the very
+                // first one was already an illegal transition.
+                await ReportProvisioningAsync("checking_sage", 20);
                 await ReportProvisioningAsync("company_selected", 30);
                 await ReportProvisioningAsync("provisioning", 40);
 
