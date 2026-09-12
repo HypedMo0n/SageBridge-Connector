@@ -18,6 +18,8 @@ namespace SageBridge.Tests
             Console.WriteLine("SageBridge Phase 1 — Connector Identity and Pairing Tests");
             Console.WriteLine("==========================================================\n");
 
+            var testDirectory = Path.Combine(Path.GetTempPath(), "sagebridge_credentials_" + Guid.NewGuid().ToString("N"));
+            CredentialManager.TestStorageDirectory = testDirectory;
             try
             {
                 TestCredentialGenerator();
@@ -33,6 +35,11 @@ namespace SageBridge.Tests
             {
                 Console.WriteLine($"FATAL: {ex}");
                 exitCode = 2;
+            }
+            finally
+            {
+                CredentialManager.TestStorageDirectory = null;
+                if (Directory.Exists(testDirectory)) Directory.Delete(testDirectory, true);
             }
 
             Console.WriteLine($"\n==========================================================");
@@ -139,8 +146,8 @@ namespace SageBridge.Tests
             CredentialManager.StoreCredential("test-connector", "secret-credential-12345");
 
             // Find the credential file
-            var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var credPath = Path.Combine(appData, "SageBridgeConnector", "credential.bin");
+            var credPath = Path.Combine(CredentialManager.TestStorageDirectory
+                ?? throw new InvalidOperationException("Tests require isolated credential storage"), "credential.bin");
 
             Assert(File.Exists(credPath), "Credential file exists");
 
@@ -188,7 +195,7 @@ namespace SageBridge.Tests
             Console.WriteLine("\n6. Pairing client validation tests");
 
             // Test null/empty pairing code
-            var client = new PairingClient("https://example.com", "tenant", "company");
+            var client = new PairingClient("https://example.com");
 
             try
             {

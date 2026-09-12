@@ -328,7 +328,8 @@ namespace SageBridge.Tests
             var heartbeatSender = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\HeartbeatSender.cs");
             Assert(heartbeatSender.Contains("/connector/heartbeat"), "HeartbeatSender posts to the existing /connector/heartbeat endpoint");
             Assert(heartbeatSender.Contains("CloudAuthenticator"), "HeartbeatSender authenticates with the per-connector machine credential, not a human/Firebase identity");
-            Assert(!heartbeatSender.Contains("/connector/jobs"), "Heartbeat does not piggyback on job polling as an implicit heartbeat");
+            Assert(!System.Text.RegularExpressions.Regex.IsMatch(heartbeatSender, @"PostAsync\s*\(\s*""\/connector\/jobs"),
+                "Heartbeat does not piggyback on job polling as an implicit heartbeat (checks the actual call site, not doc comments)");
 
             var intervalMatch = System.Text.RegularExpressions.Regex.Match(heartbeatSender, @"IntervalSeconds\s*=\s*(\d+)");
             Assert(intervalMatch.Success, "HeartbeatSender defines an explicit interval constant");
