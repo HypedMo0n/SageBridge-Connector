@@ -412,6 +412,7 @@ namespace SageBridge.Tests
                 var action = "invoice.create";
                 var payload = JObject.Parse(@"{""customerId"":""10"",""lines"":[{""sku"":""A"",""quantity"":1,""unitPrice"":10}]}");
                 var hash = OperationLedger.ComputeHash(action, payload);
+                var invoiceId = "8421";
 
                 using (var ledger = new OperationLedger(dbPath))
                 {
@@ -421,7 +422,6 @@ namespace SageBridge.Tests
 
                     // Simulate: Sage Post() succeeded and we know the record id, but
                     // the cloud has not acknowledged the result yet.
-                    var invoiceId = "8421";
                     ledger.UpdateSageRecordId(key, companyId, invoiceId);
                     ledger.MarkResultPending(key, companyId);
 

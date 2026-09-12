@@ -4,6 +4,8 @@ using System.Security.Cryptography;
 using System.Text;
 using Newtonsoft.Json;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("SageBridgeTests")]
+
 namespace SageBridge.Connector
 {
     /// <summary>
@@ -35,6 +37,8 @@ namespace SageBridge.Connector
     public static class CredentialManager
     {
         private const string TargetName = "SageBridgeConnector";
+        // Test-only seam. Never supplied by config or environment variables.
+        internal static string? TestStorageDirectory { get; set; }
 
         /// <summary>
         /// Stores the connector credential in Windows Credential Manager.
@@ -102,7 +106,7 @@ namespace SageBridge.Connector
         private static string GetCredentialFilePath()
         {
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var dir = Path.Combine(appData, "SageBridgeConnector");
+            var dir = TestStorageDirectory ?? Path.Combine(appData, "SageBridgeConnector");
             Directory.CreateDirectory(dir);
             return Path.Combine(dir, "credential.bin");
         }

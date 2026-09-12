@@ -332,10 +332,10 @@ namespace SageBridge.Connector
                             var existingCustomer = await _sageService.GetCustomerByNameAsync(GetCustomerName(existingOp));
                             if (existingCustomer != null)
                             {
-                                var sageId = existingCustomer.GetType().GetProperty("Id")?.GetValue(existingCustomer)?.ToString();
+                                var reconciledSageId = existingCustomer.GetType().GetProperty("Id")?.GetValue(existingCustomer)?.ToString();
                                 _ledger.MarkSucceeded(idempotencyKey, companyId);
                                 _completedIdempotencyKeys.Add(idempotencyKey);
-                                Log.Information("Reconciled: customer exists in Sage (ID: {Id})", sageId);
+                                Log.Information("Reconciled: customer exists in Sage (ID: {Id})", reconciledSageId);
                             }
                             else
                             {
