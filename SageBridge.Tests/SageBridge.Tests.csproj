@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <Prefer32Bit>true</Prefer32Bit>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SageBridge.Tests</RootNamespace>
+    <AssemblyName>SageBridgeTests</AssemblyName>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SageBridge.Connector\SageBridge.Connector.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Sage_SA.SDK">
+      <HintPath>C:\Program Files (x86)\Sage 50 Accounting SDK\SDK\Sage_SA.SDK.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Sage_SA.Domain">
+      <HintPath>C:\Program Files (x86)\Sage 50 Accounting SDK\SDK\Sage_SA.Domain.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Sage_SA.Domain.Utility">
+      <HintPath>C:\Program Files (x86)\Sage 50 Accounting SDK\SDK\Sage_SA.Domain.Utility.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

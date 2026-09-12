@@ -12,18 +12,14 @@ namespace SageBridge.Connector
     {
         private readonly ConnectorConfig _config;
         private readonly SageService _sageService;
-        private readonly HttpClient _httpClient;
+        private readonly CloudAuthenticator _auth;
         private Timer? _timer;
 
         public SyncEngine(ConnectorConfig config, SageService sageService)
         {
             _config = config;
             _sageService = sageService;
-            _httpClient = new HttpClient
-            {
-                BaseAddress = new Uri(config.CloudflareWorkerUrl)
-            };
-            _httpClient.DefaultRequestHeaders.Add("X-API-Key", config.ApiKey);
+            _auth = new CloudAuthenticator(config.CloudflareWorkerUrl, config.TenantId, config.CompanyId);
         }
 
         public Task StartAsync()
@@ -31,6 +27,12 @@ namespace SageBridge.Connector
             if (!_config.EnableCloudflare)
             {
                 Log.Information("Cloudflare sync disabled (running in local-only mode)");
+                return Task.CompletedTask;
+            }
+
+            if (!_auth.LoadIdentity())
+            {
+                Log.Error("Cannot start sync: connector not paired. Run with --pair first.");
                 return Task.CompletedTask;
             }
 
@@ -80,6 +82,26 @@ namespace SageBridge.Connector
                     Timestamp = DateTime.UtcNow
                 });
 
+                // Sync quotes
+                var quotes = await _sageService.GetQuotesAsync();
+                await PostToCloudAsync("/sync/quotes", new
+                {
+                    tenantId = _config.TenantId,
+                    companyId = _config.CompanyId,
+                    quotes = quotes,
+                    timestamp = DateTime.UtcNow
+                });
+
+                // Sync invoice summary
+                var invoiceSummary = await _sageService.GetInvoiceSummaryAsync();
+                await PostToCloudAsync("/sync/invoice-summary", new
+                {
+                    tenantId = _config.TenantId,
+                    companyId = _config.CompanyId,
+                    summary = invoiceSummary,
+                    timestamp = DateTime.UtcNow
+                });
+
                 Log.Information("✓ Sync completed successfully");
             }
             catch (Exception ex)
@@ -90,10 +112,7 @@ namespace SageBridge.Connector
 
         private async Task PostToCloudAsync(string endpoint, object data)
         {
-            var json = JsonConvert.SerializeObject(data);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            
-            var response = await _httpClient.PostAsync(endpoint, content);
+            var response = await _auth.PostAsync(endpoint, data);
             response.EnsureSuccessStatusCode();
         }
 

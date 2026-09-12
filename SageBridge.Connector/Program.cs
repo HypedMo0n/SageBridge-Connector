@@ -26,10 +26,32 @@ namespace SageBridge.Connector
 
                 // Initialize components
                 var config = ConnectorConfig.Load();
-                var sageService = new SageService(config);
+                using var sageService = new SageService(config);
                 var apiServer = new ApiServer(config, sageService);
                 var syncEngine = new SyncEngine(config, sageService);
                 var tunnelManager = new CloudflareTunnelManager(config);
+
+                // Handle pairing mode
+                if (args.Length > 0 && args[0] == "--pair")
+                {
+                    var wizard = new PairingWizard(config.CloudflareWorkerUrl);
+                    var paired = await wizard.RunAsync();
+                    Environment.Exit(paired ? 0 : 1);
+                    return;
+                }
+
+                // Check if connector is paired
+                if (!CredentialManager.HasStoredIdentity())
+                {
+                    Log.Error("Connector is not paired. Run with --pair to pair this connector.");
+                    Console.WriteLine();
+                    Console.WriteLine("This connector needs to be paired with your SageBridge account.");
+                    Console.WriteLine("Run: SageBridgeConnector.exe --pair");
+                    Console.WriteLine();
+                    Console.WriteLine("Or generate a pairing code from your SageBridge dashboard.");
+                    Console.ReadLine();
+                    return;
+                }
 
                 // Start API server
                 await apiServer.StartAsync();
@@ -57,18 +79,24 @@ namespace SageBridge.Connector
                 await syncEngine.StartAsync();
                 Log.Information("✓ Sync engine started (interval: {Interval}s)", config.SyncIntervalSeconds);
 
+                // Start job poller (for write operations from Cloudflare)
+                var jobPoller = new JobPoller(config, sageService);
+                jobPoller.Start();
+                Log.Information("✓ Job poller started (polling for write operations)");
+
                 Log.Information("");
                 Log.Information("═══════════════════════════════════════");
                 Log.Information("Connector is LIVE! Available endpoints:");
                 Log.Information("  GET  http://localhost:{Port}/health", config.ApiPort);
                 Log.Information("  GET  http://localhost:{Port}/api/company", config.ApiPort);
                 Log.Information("  GET  http://localhost:{Port}/api/customers", config.ApiPort);
-                Log.Information("  GET  http://localhost:{Port}/api/customers/{{id}}", config.ApiPort);
+                Log.Information("  GET  http://localhost:{Port}/api/customers/{id}", config.ApiPort);
                 Log.Information("  GET  http://localhost:{Port}/api/invoices", config.ApiPort);
                 Log.Information("  GET  http://localhost:{Port}/api/products", config.ApiPort);
                 Log.Information("  POST http://localhost:{Port}/api/customers", config.ApiPort);
                 Log.Information("═══════════════════════════════════════");
                 Log.Information("");
+
                 Log.Information("Press Ctrl+C to stop...");
 
                 // Keep running
@@ -80,7 +108,19 @@ namespace SageBridge.Connector
                     cts.Cancel();
                 };
 
-                await Task.Delay(Timeout.Infinite, cts.Token);
+                try
+                {
+                    await Task.Delay(Timeout.Infinite, cts.Token);
+                }
+                catch (TaskCanceledException) when (cts.IsCancellationRequested)
+                {
+                    // Normal Ctrl+C shutdown.
+                }
+
+                syncEngine.Stop();
+                jobPoller.Stop();
+                apiServer.Stop();
+                Log.Information("Connector stopped cleanly");
             }
             catch (Exception ex)
             {

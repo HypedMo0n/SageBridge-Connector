@@ -4,6 +4,11 @@
 *.suo
 *.userosscache
 *.sln.docstates
+*.cachefile
+*.psess
+*.vsp
+*.vspx
+*.sap
 
 # Build results
 [Dd]ebug/
@@ -18,15 +23,16 @@ bld/
 [Bb]in/
 [Oo]bj/
 [Ll]og/
-
-# NuGet
+[Rr]eports/
 *.nupkg
 *.snupkg
-**/packages/*
+**/packages/*/
 !**/packages/build/
 
-# Config (may contain API keys)
+# Config (contains secrets - NEVER commit)
 config.json
+appsettings.json
+appsettings.*.json
 
 # Logs
 logs/
@@ -36,7 +42,65 @@ logs/
 cloudflared.exe
 .cloudflared/
 
-# Sage 50 SDK (add manually)
+# Sage 50 company data (NEVER commit)
 *.sai
 *.saj
 *.sac
+*.sdb
+*.mdb
+*.bak
+
+# Local databases
+*.db
+*.sqlite
+operation_ledger.db
+
+# Credential storage
+credential.bin
+
+# Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+*.lnk
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# Windows
+*.dll
+*.exe
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.obj
+*.iobj
+*.ipch
+*.idb
+*.tlog
+*.lastbuildstate
+*.res
+*.resources
+*.manifest
+*.appx
+*.appxbundle
+*.appxupload
+*.msix
+*.msixbundle
+*.msixupload

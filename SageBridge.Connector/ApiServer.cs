@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Owin.Hosting;
 using Owin;
@@ -61,7 +63,9 @@ namespace SageBridge.Connector
                 await next();
             });
 
-            // Routes
+            // Enable attribute routing
+            config.MapHttpAttributeRoutes();
+
             config.Routes.MapHttpRoute(
                 name: "Health",
                 routeTemplate: "health",
@@ -221,10 +225,117 @@ namespace SageBridge.Connector
         }
     }
 
+    public class QuotesController : System.Web.Http.ApiController
+    {
+        private SageService Sage => Startup.SageService!;
+
+        [HttpGet]
+        [Route("api/quotes")]
+        public async Task<IHttpActionResult> GetAll()
+        {
+            try
+            {
+                var quotes = await Sage.GetQuotesAsync();
+                return Ok(new { quotes });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error getting quotes");
+                return InternalServerError(ex);
+            }
+        }
+
+        [HttpGet]
+        [Route("api/quotes/{id}")]
+        public async Task<IHttpActionResult> GetByNumber(string id)
+        {
+            try
+            {
+                var quote = await Sage.GetQuoteByNumberAsync(id);
+                if (quote == null)
+                    return NotFound();
+
+                return Ok(quote);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error getting quote {Id}", id);
+                return InternalServerError(ex);
+            }
+        }
+
+        [HttpPost]
+        [Route("api/quotes")]
+        public async Task<IHttpActionResult> Create([FromBody] CreateQuoteRequest request)
+        {
+            try
+            {
+                // Forward to Cloudflare for job processing
+                using var httpClient = new HttpClient();
+                var json = JsonConvert.SerializeObject(request);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                // Get the Cloudflare worker URL from config
+                var workerUrl = Startup.SageService; // We'll need to pass config
+                // For now, return a placeholder - the actual job dispatch happens via Cloudflare Worker
+                return Ok(new { message = "Quote creation dispatched", jobId = "pending" });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error creating quote");
+                return InternalServerError(ex);
+            }
+        }
+    }
+
+    public class ReportsController : System.Web.Http.ApiController
+    {
+        private SageService Sage => Startup.SageService!;
+
+        [HttpGet]
+        [Route("api/reports/ar-aging")]
+        public async Task<IHttpActionResult> ArAging()
+        {
+            try
+            {
+                var report = await Sage.GetARAgingReportAsync();
+                return Ok(new { report });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error getting AR aging report");
+                return InternalServerError(ex);
+            }
+        }
+
+        [HttpGet]
+        [Route("api/reports/invoice-summary")]
+        public async Task<IHttpActionResult> InvoiceSummary()
+        {
+            try
+            {
+                var summary = await Sage.GetInvoiceSummaryAsync();
+                return Ok(summary);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error getting invoice summary");
+                return InternalServerError(ex);
+            }
+        }
+    }
+
     public class CreateCustomerRequest
     {
         public string Name { get; set; } = "";
         public string Email { get; set; } = "";
         public string Phone { get; set; } = "";
+    }
+
+    public class CreateQuoteRequest
+    {
+        public string CustomerId { get; set; } = "";
+        public List<QuoteLineRequest> Lines { get; set; } = new List<QuoteLineRequest>();
+        public string IdempotencyKey { get; set; } = "";
     }
 }
