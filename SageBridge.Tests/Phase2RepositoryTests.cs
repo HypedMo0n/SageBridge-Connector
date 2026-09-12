@@ -32,7 +32,8 @@ namespace SageBridge.Tests
                 TestSyncFieldNames();
                 TestProvisioningReportedFromSync();
                 TestHeartbeatWired();
-                TestInvoiceBalanceUsesTransactionNetting();
+                TestInvoiceBalancesUseGrossDetailSums();
+                TestCustomerBalancesUseInvoiceDetailSums();
             }
             catch (Exception ex)
             {
@@ -367,44 +368,93 @@ namespace SageBridge.Tests
         }
 
         // ---------------------------------------------------------------------------
-        // 13. Regression guard for the A/R aging bug: a dashboard total far
-        //     larger than real receivables, traced to per-invoice balance
-        //     coming from tCusTrDt.dAmtOwg scoped to the invoice's own lId -
-        //     which this codebase's own GetARAgingAsync query shows can never
-        //     see a later receipt/credit (those are separate nTranType 1/2
-        //     transactions with their own lId). Balance must instead use the
-        //     same transaction-netting basis as GetARAgingAsync, and due
-        //     dates must actually be read (previously never selected at all,
-        //     which put every invoice in a single "Current" bucket).
+        // 13. Regression guard for verified Sage 50 Canada A/R behavior.
+        //     Gross invoice outstanding balance is the sum of every tCusTrDt.dAmount
+        //     attached to that invoice. Customer FIFO, pre-tax totals and dAmtOwg
+        //     must never determine final invoice balances.
         // ---------------------------------------------------------------------------
-        static void TestInvoiceBalanceUsesTransactionNetting()
+        static void TestInvoiceBalancesUseGrossDetailSums()
         {
-            Console.WriteLine("\n13. Invoice balance uses transaction netting, not tCusTrDt.dAmtOwg");
+            Console.WriteLine("\n13. Invoice list, summary and aging use gross per-invoice detail sums");
 
-            var repositoryImpls = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositoryImpls.cs");
-            Assert(!repositoryImpls.Contains("tCusTrDt"), "No remaining tCusTrDt/dAmtOwg lookups for invoice balance (replaced with transaction netting)");
-            Assert(!repositoryImpls.Contains("dAmtOwg"), "No remaining dAmtOwg references");
+            var source = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositoryImpls.cs");
+            int invoicesStart = source.IndexOf("public async Task<List<InvoiceRecord>> GetInvoicesAsync()");
+            int agingStart = source.IndexOf("public async Task<List<ARAgingRecord>> GetARAgingAsync()");
+            int summaryStart = source.IndexOf("public async Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync()");
+            int existsStart = source.IndexOf("public async Task<bool> InvoiceExistsAsync");
+            int findLastStart = source.IndexOf("public async Task<InvoiceRecord?> FindLastCreatedInvoiceAsync");
 
-            int getInvoicesStart = repositoryImpls.IndexOf("public async Task<List<InvoiceRecord>> GetInvoicesAsync()");
-            int getSummaryStart = repositoryImpls.IndexOf("public async Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync()");
-            Assert(getInvoicesStart >= 0 && getSummaryStart >= 0, "GetInvoicesAsync and GetInvoiceSummaryAsync both exist");
+            Assert(invoicesStart >= 0 && agingStart > invoicesStart && summaryStart > agingStart && existsStart > summaryStart && findLastStart > existsStart,
+                "Invoice repository methods exist in the expected order");
 
-            string getInvoicesBody = getInvoicesStart >= 0 ? repositoryImpls.Substring(getInvoicesStart, Math.Min(3000, repositoryImpls.Length - getInvoicesStart)) : "";
-            string getSummaryBody = getSummaryStart >= 0 ? repositoryImpls.Substring(getSummaryStart, Math.Min(2000, repositoryImpls.Length - getSummaryStart)) : "";
+            string invoicesBody = source.Substring(invoicesStart, agingStart - invoicesStart);
+            string agingBody = source.Substring(agingStart, summaryStart - agingStart);
+            string summaryBody = source.Substring(summaryStart, existsStart - summaryStart);
+            string findLastBody = source.Substring(findLastStart);
 
-            Assert(getInvoicesBody.Contains("GREATEST(0, LEAST(") && getInvoicesBody.Contains("nTranType = 0") && getInvoicesBody.Contains("nTranType IN (1, 2)"),
-                "GetInvoicesAsync nets nTranType=0 charges against nTranType IN (1,2) receipts/credits (same basis as GetARAgingAsync)");
-            Assert(getSummaryBody.Contains("GREATEST(0, LEAST("),
-                "GetInvoiceSummaryAsync's paid/unpaid counts use the same balance formula as GetInvoicesAsync, so they cannot disagree");
+            Assert(invoicesBody.Contains("SUM(d.dAmount)") && invoicesBody.Contains("d.lCusTrId = h.lId"),
+                "Invoice list derives each balance from all detail amounts attached to that invoice");
+            Assert(invoicesBody.Contains("SUM(CASE WHEN d.nTranType = 0 THEN d.dAmount ELSE 0 END)") && invoicesBody.Contains("AS dTotal"),
+                "Invoice list returns the original gross invoice total separately from outstanding balance");
+            Assert(invoicesBody.Contains("0.005") && invoicesBody.Contains("AS dBalance"),
+                "Invoice list normalizes sub-cent balance noise to zero");
+            Assert(!invoicesBody.Contains("GREATEST(0, LEAST(") && !invoicesBody.Contains("nTranType IN (1, 2)") && !invoicesBody.Contains("dAmtOwg"),
+                "Invoice list has no FIFO, header netting or dAmtOwg balance logic");
 
-            Assert(getInvoicesBody.Contains("dtDueDate"), "GetInvoicesAsync reads a due date");
-            Assert(getInvoicesBody.Contains("catch (Exception"), "Due-date lookup is defensive - an unverified column name cannot break the rest of invoice sync");
+            Assert(summaryBody.Contains("SUM(d.dAmount) AS dBalance") &&
+                   summaryBody.Contains("SUM(CASE WHEN i.dBalance >= 0.005 THEN i.dBalance ELSE 0 END)"),
+                "Invoice summary uses authoritative per-invoice balances and sums only amounts still owed");
+            Assert(!summaryBody.Contains("dPreTaxAmt") && !summaryBody.Contains("GREATEST(0, LEAST(") && !summaryBody.Contains("dAmtOwg"),
+                "Invoice summary has no pre-tax, FIFO or dAmtOwg final-balance logic");
+
+            Assert(agingBody.Contains("SUM(d.dAmount)") && agingBody.Contains("AS dBalance") &&
+                   agingBody.Contains("i.dBalance >= 0.005") && agingBody.Contains("AS dTotal"),
+                "Customer A/R totals and aging buckets aggregate positive authoritative invoice balances");
+            Assert(!agingBody.Contains("dPreTaxAmt") && !agingBody.Contains("nTranType IN (1, 2)") && !agingBody.Contains("dAmtOwg"),
+                "A/R aging has no pre-tax, header netting or dAmtOwg final-balance logic");
+
+            Assert(findLastBody.Contains("SUM(d.dAmount)") && findLastBody.Contains("d.lCusTrId = h.lId") && !findLastBody.Contains("dAmtOwg"),
+                "Post-write invoice read-back uses the same authoritative gross balance");
+
+            Assert(invoicesBody.Contains("dtDueDate") && invoicesBody.Contains("catch (Exception"),
+                "Due-date lookup remains defensive and cannot break invoice sync");
 
             var repositories = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositories.cs");
             Assert(repositories.Contains("DateTime? DueDate"), "InvoiceRecord carries a DueDate field");
 
             var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
             Assert(sageService.Contains("i.DueDate"), "SageService.GetInvoicesAsync threads DueDate into the sync payload");
+        }
+
+        // ---------------------------------------------------------------------------
+        // 14. Customer list/detail balances must aggregate the same positive,
+        //     authoritative per-invoice balances used by reports and dashboard.
+        // ---------------------------------------------------------------------------
+        static void TestCustomerBalancesUseInvoiceDetailSums()
+        {
+            Console.WriteLine("\n14. Customer balances use authoritative per-invoice detail sums");
+
+            var source = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageDataRepositoryImpls.cs");
+            int listStart = source.IndexOf("public async Task<List<CustomerRecord>> GetCustomersAsync()");
+            int idStart = source.IndexOf("public async Task<CustomerRecord?> GetCustomerByIdAsync");
+            int nameStart = source.IndexOf("public async Task<CustomerRecord?> GetCustomerByNameAsync");
+            int resolveStart = source.IndexOf("public async Task<string?> ResolveCustomerNameAsync");
+
+            Assert(listStart >= 0 && idStart > listStart && nameStart > idStart && resolveStart > nameStart,
+                "Customer repository methods exist in the expected order");
+
+            string listBody = source.Substring(listStart, idStart - listStart);
+            string idBody = source.Substring(idStart, nameStart - idStart);
+            string nameBody = source.Substring(nameStart, resolveStart - nameStart);
+
+            foreach (string body in new[] { listBody, idBody, nameBody })
+            {
+                Assert(body.Contains("SUM(d.dAmount)") && body.Contains("d.lCusTrId = h.lId") &&
+                       body.Contains("i.dBalance >= 0.005") && body.Contains("AS dBalance"),
+                    "Customer query aggregates positive gross balances per invoice");
+                Assert(!body.Contains("dPreTaxAmt") && !body.Contains("nTranType IN (1, 2)") && !body.Contains("dAmtOwg"),
+                    "Customer query has no pre-tax, header netting or dAmtOwg final-balance logic");
+            }
         }
     }
 }

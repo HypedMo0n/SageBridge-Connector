@@ -196,53 +196,35 @@ WHERE bQuote = 1 AND sSONum = '{SanitizeSql(quoteNumber.Trim())}'";
         /// Get all invoices from Sage.
         /// Uses tCusTr table with nTranType=0 (Sage 50 Canada 2026 internal schema).
         ///
-        /// Balance calculation: previously this took the latest tCusTrDt.dAmtOwg
-        /// row scoped to the invoice's own lId. That is very likely wrong -
-        /// GetARAgingAsync (below) proves this codebase's own understanding of
-        /// the schema is that receipts and credit memos are separate tCusTr
-        /// transactions (nTranType 1/2), each with their own lId and their own
-        /// tCusTrDt distribution rows - not child rows of the original invoice.
-        /// A query scoped to `tCusTrDt WHERE lCusTrId = h.lId` (h = the invoice)
-        /// would therefore only ever see the invoice's OWN distribution lines,
-        /// never a later payment, so "the latest dAmtOwg row" for a paid-off
-        /// invoice would still reflect its original amount forever. That
-        /// matches a real, reported bug: a dashboard total far larger than
-        /// actual receivables, entirely attributable to paid invoices still
-        /// contributing their full historical amount.
-        ///
-        /// Fixed to use the same transaction-netting basis as GetARAgingAsync
-        /// (SUM invoices minus SUM receipts/credits for the customer, treating
-        /// nTranType 0 as a charge and 1/2 as a reduction) instead of a second,
-        /// inconsistent mechanism. Because Sage's schema does not give this
-        /// connector a proven way to attribute a specific receipt to a specific
-        /// invoice, remaining balance is allocated FIFO across the customer's
-        /// invoices, oldest first - the standard approach when explicit
-        /// per-invoice payment application isn't available. This guarantees
-        /// SUM(all invoice balances for a customer) reconciles exactly to that
-        /// customer's net total from GetARAgingAsync's own proven formula; it
-        /// does not guess a new balance figure independently.
-        ///
-        /// UNVERIFIED AGAINST THE REAL SDK/DATA: this has not been run against
-        /// a live Sage 50 company. Confirm SUM(balance) here reconciles to
-        /// Sage 50's own A/R Aging / customer receivables report before
-        /// trusting it, and if Sage's schema does expose a genuine
-        /// receipt-to-invoice application link, prefer that over FIFO.
+        /// Sage's authoritative gross outstanding balance is the sum of every
+        /// tCusTrDt.dAmount row owned by the invoice through lCusTrId. This
+        /// includes the original gross amount, tax, receipt applications, and
+        /// credit adjustments. Sub-cent residuals are normalized to zero.
         /// </summary>
         public async Task<List<InvoiceRecord>> GetInvoicesAsync()
         {
-            // Sage internal schema: tCusTr stores customer transactions.
-            // nTranType=0 indicates an invoice, nTranType=1=order, nTranType=2=quote (legacy).
-            // This is an implementation detail of Sage 50 Canada 2026.
+            // Sage internal schema: tCusTr stores customer transaction headers;
+            // tCusTrDt rows identify their owning invoice through lCusTrId.
             const string sql = @"
 SELECT h.lId, h.lCusId, c.sName AS sCustomerName, h.sSource,
        h.dtDate, h.dPreTaxAmt, h.sRef,
-       GREATEST(0, LEAST(h.dPreTaxAmt,
-           (SELECT COALESCE(SUM(h2.dPreTaxAmt), 0) FROM tCusTr h2
-            WHERE h2.lCusId = h.lCusId AND h2.nTranType = 0 AND h2.lId <= h.lId)
-           -
-           (SELECT COALESCE(SUM(h3.dPreTaxAmt), 0) FROM tCusTr h3
-            WHERE h3.lCusId = h.lCusId AND h3.nTranType IN (1, 2))
-       )) AS dBalance
+       COALESCE((
+           SELECT SUM(CASE WHEN d.nTranType = 0 THEN d.dAmount ELSE 0 END)
+           FROM tCusTrDt d
+           WHERE d.lCusTrId = h.lId
+       ), 0) AS dTotal,
+       CASE
+           WHEN ABS(COALESCE((
+               SELECT SUM(d.dAmount)
+               FROM tCusTrDt d
+               WHERE d.lCusTrId = h.lId
+           ), 0)) < 0.005 THEN 0
+           ELSE COALESCE((
+               SELECT SUM(d.dAmount)
+               FROM tCusTrDt d
+               WHERE d.lCusTrId = h.lId
+           ), 0)
+       END AS dBalance
 FROM tCusTr h
 INNER JOIN tCustomr c ON c.lId = h.lCusId
 WHERE h.nTranType = 0
@@ -273,7 +255,8 @@ ORDER BY h.dtDate DESC, h.lId DESC";
 
             foreach (DataRow row in table.Rows)
             {
-                decimal total = GetDecimal(row, "dPreTaxAmt");
+                decimal preTaxTotal = GetDecimal(row, "dPreTaxAmt");
+                decimal total = GetDecimal(row, "dTotal");
                 decimal balance = GetDecimal(row, "dBalance");
                 var id = GetText(row, "lId");
                 invoices.Add(new InvoiceRecord
@@ -285,10 +268,10 @@ ORDER BY h.dtDate DESC, h.lId DESC";
                     Reference = GetText(row, "sRef"),
                     Date = GetNullableDate(row, "dtDate"),
                     DueDate = dueDates.TryGetValue(id, out var due) ? due : null,
-                    PreTaxTotal = total,
+                    PreTaxTotal = preTaxTotal,
                     Total = total,
                     Balance = balance,
-                    Status = balance == 0m ? "Paid" : "Unpaid"
+                    Status = balance <= 0m ? "Paid" : "Unpaid"
                 });
             }
 
@@ -296,36 +279,37 @@ ORDER BY h.dtDate DESC, h.lId DESC";
         }
 
         /// <summary>
-        /// Get AR aging report showing outstanding balances by customer.
-        /// Uses tCusTr table with nTranType=0 (Sage 50 Canada 2026 internal schema).
+        /// Get A/R aging from each invoice's authoritative gross outstanding balance.
         /// Uses MySQL-compatible DATE_SUB functions.
         /// </summary>
         public async Task<List<ARAgingRecord>> GetARAgingAsync()
         {
-            // Sage internal schema: tCusTr stores customer transactions.
-            // nTranType=0 indicates an invoice.
-            // MySQL DATE_SUB used for date calculations (Sage 50 Canada 2026 uses MySQL).
+            // Only positive, non-trivial invoice balances are amounts owed. Paid
+            // invoices and sub-cent residuals do not contribute to totals/buckets.
             const string sql = @"
 SELECT c.lId, c.sName, c.sCntcName, c.sPhone1,
-       SUM(CASE WHEN h.nTranType = 0 THEN h.dPreTaxAmt
-                WHEN h.nTranType IN (1, 2) THEN -h.dPreTaxAmt
-                ELSE 0 END) AS dTotal,
-       SUM(CASE WHEN h.nTranType = 0 AND h.dtDate >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN h.dPreTaxAmt
-                WHEN h.nTranType IN (1, 2) AND h.dtDate >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN -h.dPreTaxAmt
-                ELSE 0 END) AS dCurrent,
-       SUM(CASE WHEN h.nTranType = 0 AND h.dtDate < DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND h.dtDate >= DATE_SUB(CURDATE(), INTERVAL 60 DAY) THEN h.dPreTaxAmt
-                WHEN h.nTranType IN (1, 2) AND h.dtDate < DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND h.dtDate >= DATE_SUB(CURDATE(), INTERVAL 60 DAY) THEN -h.dPreTaxAmt
-                ELSE 0 END) AS d30_60,
-       SUM(CASE WHEN h.nTranType = 0 AND h.dtDate < DATE_SUB(CURDATE(), INTERVAL 60 DAY) AND h.dtDate >= DATE_SUB(CURDATE(), INTERVAL 90 DAY) THEN h.dPreTaxAmt
-                WHEN h.nTranType IN (1, 2) AND h.dtDate < DATE_SUB(CURDATE(), INTERVAL 60 DAY) AND h.dtDate >= DATE_SUB(CURDATE(), INTERVAL 90 DAY) THEN -h.dPreTaxAmt
-                ELSE 0 END) AS d60_90,
-       SUM(CASE WHEN h.nTranType = 0 AND h.dtDate < DATE_SUB(CURDATE(), INTERVAL 90 DAY) THEN h.dPreTaxAmt
-                WHEN h.nTranType IN (1, 2) AND h.dtDate < DATE_SUB(CURDATE(), INTERVAL 90 DAY) THEN -h.dPreTaxAmt
-                ELSE 0 END) AS dOver90
+       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 THEN i.dBalance ELSE 0 END), 0) AS dTotal,
+       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 AND i.dtDate >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                         THEN i.dBalance ELSE 0 END), 0) AS dCurrent,
+       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 AND i.dtDate < DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                              AND i.dtDate >= DATE_SUB(CURDATE(), INTERVAL 60 DAY)
+                         THEN i.dBalance ELSE 0 END), 0) AS d30_60,
+       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 AND i.dtDate < DATE_SUB(CURDATE(), INTERVAL 60 DAY)
+                              AND i.dtDate >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+                         THEN i.dBalance ELSE 0 END), 0) AS d60_90,
+       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 AND i.dtDate < DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+                         THEN i.dBalance ELSE 0 END), 0) AS dOver90
 FROM tCustomr c
-LEFT JOIN tCusTr h ON h.lCusId = c.lId
+LEFT JOIN (
+    SELECT h.lId, h.lCusId, h.dtDate,
+           COALESCE(SUM(d.dAmount), 0) AS dBalance
+    FROM tCusTr h
+    LEFT JOIN tCusTrDt d ON d.lCusTrId = h.lId
+    WHERE h.nTranType = 0
+    GROUP BY h.lId, h.lCusId, h.dtDate
+) i ON i.lCusId = c.lId
 GROUP BY c.lId, c.sName, c.sCntcName, c.sPhone1
-HAVING dTotal <> 0
+HAVING dTotal >= 0.005
 ORDER BY c.sName";
 
             var report = new List<ARAgingRecord>();
@@ -351,37 +335,25 @@ ORDER BY c.sName";
         }
 
         /// <summary>
-        /// Get a summary of invoice totals by paid/unpaid status.
-        /// Uses tCusTr table with nTranType=0 (Sage 50 Canada 2026 internal schema).
-        /// Paid/unpaid is derived from the same FIFO transaction-netting
-        /// balance as GetInvoicesAsync (see its remarks) rather than the
-        /// previous tCusTrDt.dAmtOwg lookup, so the two never disagree about
-        /// whether a given invoice is paid.
+        /// Get invoice counts and total outstanding amount from the same gross
+        /// per-invoice detail sum used by invoice lists and A/R aging.
         /// </summary>
         public async Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync()
         {
-            // Sage internal schema: tCusTr stores customer transactions.
-            // nTranType=0 indicates an invoice.
             const string sql = @"
 SELECT
     COUNT(*) AS nCount,
-    SUM(dPreTaxAmt) AS dTotal,
-    SUM(CASE WHEN GREATEST(0, LEAST(h.dPreTaxAmt,
-                    (SELECT COALESCE(SUM(h2.dPreTaxAmt), 0) FROM tCusTr h2
-                     WHERE h2.lCusId = h.lCusId AND h2.nTranType = 0 AND h2.lId <= h.lId)
-                    -
-                    (SELECT COALESCE(SUM(h3.dPreTaxAmt), 0) FROM tCusTr h3
-                     WHERE h3.lCusId = h.lCusId AND h3.nTranType IN (1, 2))
-                )) = 0 THEN 1 ELSE 0 END) AS nPaid,
-    SUM(CASE WHEN GREATEST(0, LEAST(h.dPreTaxAmt,
-                    (SELECT COALESCE(SUM(h2.dPreTaxAmt), 0) FROM tCusTr h2
-                     WHERE h2.lCusId = h.lCusId AND h2.nTranType = 0 AND h2.lId <= h.lId)
-                    -
-                    (SELECT COALESCE(SUM(h3.dPreTaxAmt), 0) FROM tCusTr h3
-                     WHERE h3.lCusId = h.lCusId AND h3.nTranType IN (1, 2))
-                )) <> 0 THEN 1 ELSE 0 END) AS nUnpaid
-FROM tCusTr h
-WHERE h.nTranType = 0";
+    COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 THEN i.dBalance ELSE 0 END), 0) AS dTotal,
+    SUM(CASE WHEN ABS(COALESCE(i.dBalance, 0)) < 0.005 OR i.dBalance < 0
+             THEN 1 ELSE 0 END) AS nPaid,
+    SUM(CASE WHEN i.dBalance >= 0.005 THEN 1 ELSE 0 END) AS nUnpaid
+FROM (
+    SELECT h.lId, SUM(d.dAmount) AS dBalance
+    FROM tCusTr h
+    LEFT JOIN tCusTrDt d ON d.lCusTrId = h.lId
+    WHERE h.nTranType = 0
+    GROUP BY h.lId
+) i";
 
             var table = await Task.Run(() => _sageService.Select(sql));
             var row = table.Rows[0];
@@ -436,10 +408,22 @@ WHERE nTranType = 0 AND lId = {numericId}";
 SELECT h.lId, h.lCusId, c.sName AS sCustomerName, h.sSource,
        h.dtDate, h.dPreTaxAmt, h.sRef,
        COALESCE((
-           SELECT d.dAmtOwg FROM tCusTrDt d
+           SELECT SUM(CASE WHEN d.nTranType = 0 THEN d.dAmount ELSE 0 END)
+           FROM tCusTrDt d
            WHERE d.lCusTrId = h.lId
-           ORDER BY d.lId DESC LIMIT 1
-       ), 0) AS dBalance
+       ), 0) AS dTotal,
+       CASE
+           WHEN ABS(COALESCE((
+               SELECT SUM(d.dAmount)
+               FROM tCusTrDt d
+               WHERE d.lCusTrId = h.lId
+           ), 0)) < 0.005 THEN 0
+           ELSE COALESCE((
+               SELECT SUM(d.dAmount)
+               FROM tCusTrDt d
+               WHERE d.lCusTrId = h.lId
+           ), 0)
+       END AS dBalance
 FROM tCusTr h
 INNER JOIN tCustomr c ON c.lId = h.lCusId
 WHERE h.nTranType = 0 AND c.sName = '{SanitizeSql(customerName.Trim())}'
@@ -452,7 +436,8 @@ LIMIT 1";
                 return null;
 
             var row = table.Rows[0];
-            decimal total = GetDecimal(row, "dPreTaxAmt");
+            decimal preTaxTotal = GetDecimal(row, "dPreTaxAmt");
+            decimal total = GetDecimal(row, "dTotal");
             decimal balance = GetDecimal(row, "dBalance");
             return new InvoiceRecord
             {
@@ -462,10 +447,10 @@ LIMIT 1";
                 InvoiceNumber = GetText(row, "sSource"),
                 Reference = GetText(row, "sRef"),
                 Date = GetNullableDate(row, "dtDate"),
-                PreTaxTotal = total,
+                PreTaxTotal = preTaxTotal,
                 Total = total,
                 Balance = balance,
-                Status = balance == 0m ? "Paid" : "Unpaid"
+                Status = balance <= 0m ? "Paid" : "Unpaid"
             };
         }
 
