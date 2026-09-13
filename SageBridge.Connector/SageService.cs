@@ -203,15 +203,13 @@ namespace SageBridge.Connector
                 i.InvoiceNumber,
                 i.Reference,
                 i.Date,
-                i.DueDate,
                 i.PreTaxTotal,
                 i.Total,
                 i.Balance,
                 i.TransactionCurrencyTotal,
                 i.TransactionCurrencyBalance,
                 i.HomeCurrencyTotal,
-                i.HomeCurrencyBalance,
-                i.Status
+                i.HomeCurrencyBalance
             }).ToList();
         }
 
@@ -278,9 +276,7 @@ namespace SageBridge.Connector
                 q.CustomerName,
                 q.QuoteNumber,
                 q.Date,
-                q.Total,
-                q.Balance,
-                q.Status
+                q.Total
             }).ToList();
         }
 
@@ -301,9 +297,7 @@ namespace SageBridge.Connector
                 quote.CustomerName,
                 quote.QuoteNumber,
                 quote.Date,
-                quote.Total,
-                quote.Balance,
-                quote.Status
+                quote.Total
             };
         }
 
@@ -609,28 +603,7 @@ namespace SageBridge.Connector
         }
 
         /// <summary>
-        /// Get a simple AR aging report from Sage.
-        /// Delegates to the invoice repository which encapsulates Sage internal schema details.
-        /// </summary>
-        public async Task<List<object>> GetARAgingReportAsync()
-        {
-            var report = await _invoiceRepository.GetARAgingAsync();
-            return report.Select(r => (object)new
-            {
-                r.CustomerId,
-                r.CustomerName,
-                r.Contact,
-                r.Phone,
-                r.Total,
-                r.Current,
-                r.Days30_60,
-                r.Days60_90,
-                r.Over90
-            }).ToList();
-        }
-
-        /// <summary>
-        /// Get a summary of invoice totals by status.
+        /// Get safe aggregations of authoritative invoice balances.
         /// Delegates to the invoice repository which encapsulates Sage internal schema details.
         /// </summary>
         public async Task<object> GetInvoiceSummaryAsync()
@@ -641,9 +614,7 @@ namespace SageBridge.Connector
                 summary.TotalCount,
                 summary.TotalAmount,
                 summary.TransactionCurrencyTotal,
-                summary.HomeCurrencyTotal,
-                summary.PaidCount,
-                summary.UnpaidCount
+                summary.HomeCurrencyTotal
             };
         }
 
@@ -715,8 +686,7 @@ namespace SageBridge.Connector
                 Id = id,
                 Name = name.Trim(),
                 Email = email?.Trim() ?? string.Empty,
-                Phone = phone?.Trim() ?? string.Empty,
-                Status = "Active"
+                Phone = phone?.Trim() ?? string.Empty
             };
         }
 

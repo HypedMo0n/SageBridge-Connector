@@ -39,12 +39,7 @@ namespace SageBridge.Connector
             // This is an implementation detail of Sage 50 Canada 2026.
             const string sql = @"
 SELECT h.lId, h.lCusId, c.sName AS sCustomerName, h.sSONum AS sQuoteNumber,
-       h.dtSODate AS dtDate, h.dTotal, h.bQuote,
-       COALESCE((
-           SELECT SUM(d.dAmtOwg) FROM tCusTrDt d
-           WHERE d.lCusTrId = h.lId
-           ORDER BY d.lId DESC LIMIT 1
-       ), 0) AS dBalance
+       h.dtSODate AS dtDate, h.dTotal
 FROM tsalordr h
 INNER JOIN tCustomr c ON c.lId = h.lCusId
 WHERE h.bQuote = 1
@@ -63,8 +58,7 @@ ORDER BY h.dtSODate DESC, h.lId DESC";
                     QuoteNumber = GetText(row, "sQuoteNumber"),
                     Date = GetNullableDate(row, "dtDate"),
                     Total = GetDecimal(row, "dTotal"),
-                    Balance = GetDecimal(row, "dBalance"),
-                    Status = "Quote"
+
                 });
             }
 
@@ -83,12 +77,7 @@ ORDER BY h.dtSODate DESC, h.lId DESC";
             // Parameterized query to prevent SQL injection
             var sql = $@"
 SELECT h.lId, h.lCusId, c.sName AS sCustomerName, h.sSONum AS sQuoteNumber,
-       h.dtSODate AS dtDate, h.dTotal, h.bQuote,
-       COALESCE((
-           SELECT SUM(d.dAmtOwg) FROM tCusTrDt d
-           WHERE d.lCusTrId = h.lId
-           ORDER BY d.lId DESC LIMIT 1
-       ), 0) AS dBalance
+       h.dtSODate AS dtDate, h.dTotal
 FROM tsalordr h
 INNER JOIN tCustomr c ON c.lId = h.lCusId
 WHERE h.bQuote = 1 AND h.sSONum = '{SanitizeSql(quoteNumber.Trim())}'
@@ -108,8 +97,7 @@ LIMIT 1";
                 QuoteNumber = GetText(row, "sQuoteNumber"),
                 Date = GetNullableDate(row, "dtDate"),
                 Total = GetDecimal(row, "dTotal"),
-                Balance = GetDecimal(row, "dBalance"),
-                Status = "Quote"
+
             };
         }
 
@@ -258,7 +246,6 @@ ORDER BY h.dtDate DESC, h.lId DESC";
                     InvoiceNumber = GetText(row, "sSource"),
                     Reference = GetText(row, "sRef"),
                     Date = GetNullableDate(row, "dtDate"),
-                    DueDate = null,
                     PreTaxTotal = preTaxTotal,
                     Total = homeTotal,
                     Balance = homeBalance,
@@ -266,78 +253,10 @@ ORDER BY h.dtDate DESC, h.lId DESC";
                     TransactionCurrencyBalance = transactionBalance,
                     HomeCurrencyTotal = homeTotal,
                     HomeCurrencyBalance = homeBalance,
-                    Status = homeBalance <= 0m ? "Paid" : "Unpaid"
                 });
             }
 
             return invoices;
-        }
-
-        /// <summary>
-        /// Get A/R aging from each invoice's authoritative gross outstanding balance.
-        /// Uses MySQL-compatible DATE_SUB functions.
-        /// </summary>
-        public async Task<List<ARAgingRecord>> GetARAgingAsync()
-        {
-            // A/R reporting includes open invoices plus credit/debit notes.
-            // Amounts are normalized to Sage's home/reporting currency.
-            const string sql = @"
-SELECT c.lId, c.sName, c.sCntcName, c.sPhone1,
-       COALESCE(SUM(CASE WHEN (i.nTranType = 0 AND i.dHomeBalance >= 0.005)
-                              OR i.nTranType IN (8, 9)
-                         THEN i.dHomeBalance ELSE 0 END), 0) AS dTotal,
-       COALESCE(SUM(CASE WHEN ((i.nTranType = 0 AND i.dHomeBalance >= 0.005)
-                              OR i.nTranType IN (8, 9))
-                              AND i.dtDate >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-                         THEN i.dHomeBalance ELSE 0 END), 0) AS dCurrent,
-       COALESCE(SUM(CASE WHEN ((i.nTranType = 0 AND i.dHomeBalance >= 0.005)
-                              OR i.nTranType IN (8, 9))
-                              AND i.dtDate < DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-                              AND i.dtDate >= DATE_SUB(CURDATE(), INTERVAL 60 DAY)
-                         THEN i.dHomeBalance ELSE 0 END), 0) AS d30_60,
-       COALESCE(SUM(CASE WHEN ((i.nTranType = 0 AND i.dHomeBalance >= 0.005)
-                              OR i.nTranType IN (8, 9))
-                              AND i.dtDate < DATE_SUB(CURDATE(), INTERVAL 60 DAY)
-                              AND i.dtDate >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
-                         THEN i.dHomeBalance ELSE 0 END), 0) AS d60_90,
-       COALESCE(SUM(CASE WHEN ((i.nTranType = 0 AND i.dHomeBalance >= 0.005)
-                              OR i.nTranType IN (8, 9))
-                              AND i.dtDate < DATE_SUB(CURDATE(), INTERVAL 90 DAY)
-                         THEN i.dHomeBalance ELSE 0 END), 0) AS dOver90
-FROM tCustomr c
-LEFT JOIN (
-    SELECT h.lId, h.lCusId, h.dtDate, h.nTranType,
-           COALESCE(SUM(d.dAmount), 0) AS dTransactionBalance,
-           COALESCE(SUM(CASE WHEN h.lCurrncyId = 1 THEN d.dAmount ELSE d.dAmtHm END), 0) AS dHomeBalance
-    FROM tCusTr h
-    LEFT JOIN tCusTrDt d ON d.lCusTrId = h.lId
-    WHERE h.nTranType IN (0, 8, 9)
-    GROUP BY h.lId, h.lCusId, h.dtDate, h.nTranType
-) i ON i.lCusId = c.lId
-GROUP BY c.lId, c.sName, c.sCntcName, c.sPhone1
-HAVING dTotal >= 0.005
-ORDER BY c.sName";
-
-            var report = new List<ARAgingRecord>();
-            var table = await Task.Run(() => _sageService.Select(sql));
-
-            foreach (DataRow row in table.Rows)
-            {
-                report.Add(new ARAgingRecord
-                {
-                    CustomerId = GetText(row, "lId"),
-                    CustomerName = GetText(row, "sName"),
-                    Contact = GetText(row, "sCntcName"),
-                    Phone = GetText(row, "sPhone1"),
-                    Total = GetDecimal(row, "dTotal"),
-                    Current = GetDecimal(row, "dCurrent"),
-                    Days30_60 = GetDecimal(row, "d30_60"),
-                    Days60_90 = GetDecimal(row, "d60_90"),
-                    Over90 = GetDecimal(row, "dOver90")
-                });
-            }
-
-            return report;
         }
 
         /// <summary>
@@ -357,12 +276,7 @@ SELECT
     COALESCE(SUM(CASE WHEN i.nTranType = 0 AND i.dTransactionBalance >= 0.005
                            THEN i.dTransactionBalance
                       WHEN i.nTranType IN (8, 9) THEN i.dTransactionBalance
-                      ELSE 0 END), 0) AS dTransactionTotal,
-    SUM(CASE WHEN i.nTranType = 0 AND (ABS(COALESCE(i.dHomeBalance, 0)) < 0.005
-                                      OR i.dHomeBalance < 0)
-             THEN 1 ELSE 0 END) AS nPaid,
-    SUM(CASE WHEN i.nTranType = 0 AND i.dHomeBalance >= 0.005
-             THEN 1 ELSE 0 END) AS nUnpaid
+                      ELSE 0 END), 0) AS dTransactionTotal
 FROM (
     SELECT h.lId, h.nTranType,
            COALESCE(SUM(d.dAmount), 0) AS dTransactionBalance,
@@ -381,9 +295,7 @@ FROM (
                 TotalCount = Convert.ToInt32(row["nCount"]),
                 TotalAmount = GetDecimal(row, "dHomeTotal"),
                 TransactionCurrencyTotal = GetDecimal(row, "dTransactionTotal"),
-                HomeCurrencyTotal = GetDecimal(row, "dHomeTotal"),
-                PaidCount = Convert.ToInt32(row["nPaid"]),
-                UnpaidCount = Convert.ToInt32(row["nUnpaid"])
+                HomeCurrencyTotal = GetDecimal(row, "dHomeTotal")
             };
         }
 
@@ -478,7 +390,6 @@ LIMIT 1";
                 InvoiceNumber = GetText(row, "sSource"),
                 Reference = GetText(row, "sRef"),
                 Date = GetNullableDate(row, "dtDate"),
-                DueDate = null,
                 PreTaxTotal = preTaxTotal,
                 Total = homeTotal,
                 Balance = homeBalance,
@@ -486,7 +397,6 @@ LIMIT 1";
                 TransactionCurrencyBalance = transactionBalance,
                 HomeCurrencyTotal = homeTotal,
                 HomeCurrencyBalance = homeBalance,
-                Status = homeBalance <= 0m ? "Paid" : "Unpaid"
             };
         }
 

@@ -68,16 +68,18 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("1. Controller existence checks");
 
-            var apiServer = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\ApiServer.cs");
+            var apiServer = File.ReadAllText(SourceFile("ApiServer.cs"));
             Assert(apiServer.Contains("public class QuotesController"), "QuotesController exists in ApiServer.cs");
         }
 
         static void TestReportsControllerExists()
         {
-            Console.WriteLine("2. ReportsController existence check");
+            Console.WriteLine("2. ReportsController contract check");
 
-            var apiServer = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\ApiServer.cs");
+            var apiServer = File.ReadAllText(SourceFile("ApiServer.cs"));
             Assert(apiServer.Contains("public class ReportsController"), "ReportsController exists in ApiServer.cs");
+            Assert(!apiServer.Contains("api/reports/ar-aging"), "A/R aging endpoint is removed");
+            Assert(!apiServer.Contains("GetARAgingReportAsync"), "A/R aging service call is removed");
         }
 
         // ---------------------------------------------------------------------------
@@ -87,7 +89,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n2. No SQL in controllers");
 
-            var apiServer = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\ApiServer.cs");
+            var apiServer = File.ReadAllText(SourceFile("ApiServer.cs"));
             Assert(!apiServer.Contains("SELECT") || apiServer.IndexOf("SELECT") < 0 || !IsInControllerClass(apiServer, "SELECT"),
                 "ApiServer.cs has no SELECT statements in controller classes");
             Assert(!apiServer.Contains("INSERT INTO"), "ApiServer.cs has no INSERT statements");
@@ -108,7 +110,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n3. No SQL in SyncEngine.cs");
 
-            var syncEngine = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SyncEngine.cs");
+            var syncEngine = File.ReadAllText(SourceFile("SyncEngine.cs"));
             Assert(!syncEngine.Contains("SELECT"), "SyncEngine.cs has no SELECT statements");
             Assert(!syncEngine.Contains("INSERT"), "SyncEngine.cs has no INSERT statements");
             Assert(!syncEngine.Contains("UPDATE"), "SyncEngine.cs has no UPDATE statements");
@@ -124,19 +126,19 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n4. No direct table references in business logic files");
 
-            var jobPoller = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\JobPoller.cs");
+            var jobPoller = File.ReadAllText(SourceFile("JobPoller.cs"));
             Assert(!jobPoller.Contains("tsalordr"), "JobPoller.cs has no tsalordr references");
             Assert(!jobPoller.Contains("tCusTr"), "JobPoller.cs has no tCusTr references");
             Assert(!jobPoller.Contains("bQuote"), "JobPoller.cs has no bQuote references");
             Assert(!jobPoller.Contains("nTranType"), "JobPoller.cs has no nTranType references");
 
-            var syncEngine = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SyncEngine.cs");
+            var syncEngine = File.ReadAllText(SourceFile("SyncEngine.cs"));
             Assert(!syncEngine.Contains("tsalordr"), "SyncEngine.cs has no tsalordr references");
             Assert(!syncEngine.Contains("tCusTr"), "SyncEngine.cs has no tCusTr references");
             Assert(!syncEngine.Contains("bQuote"), "SyncEngine.cs has no bQuote references");
             Assert(!syncEngine.Contains("nTranType"), "SyncEngine.cs has no nTranType references");
 
-            var apiServer = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\ApiServer.cs");
+            var apiServer = File.ReadAllText(SourceFile("ApiServer.cs"));
             Assert(!apiServer.Contains("tsalordr"), "ApiServer.cs has no tsalordr references");
             Assert(!apiServer.Contains("tCusTr"), "ApiServer.cs has no tCusTr references");
             Assert(!apiServer.Contains("bQuote"), "ApiServer.cs has no bQuote references");
@@ -175,16 +177,16 @@ namespace SageBridge.Tests
                 var summary = JObject.Parse(summaryResponse);
                 Assert(summary["TotalCount"] != null, "GET /api/reports/invoice-summary works");
 
-                // Test GET /api/reports/ar-aging
-                var agingResponse = HttpClientGet("http://localhost:5001/api/reports/ar-aging");
-                var aging = JObject.Parse(agingResponse);
-                var agingArray = aging["report"] as JArray;
-                Assert(agingArray != null && agingArray.Count > 0, "GET /api/reports/ar-aging works", $"got {agingArray?.Count}");
             }
             catch (Exception ex)
             {
                 Assert(false, "API endpoints test failed", ex.Message);
             }
+        }
+
+        static string SourceFile(string fileName)
+        {
+            return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\..\..\SageBridge.Connector", fileName));
         }
 
         static string HttpClientGet(string url)
@@ -205,7 +207,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n6. Quote creation uses SDK");
 
-            var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
+            var sageService = File.ReadAllText(SourceFile("SageService.cs"));
             Assert(sageService.Contains("salJourn.Post()"), "Quote creation uses SalesJournal.Post()");
             Assert(sageService.Contains("SDKInstanceManager.Instance.OpenSalesJournal()"), "Quote creation uses SDK OpenSalesJournal");
             Assert(!sageService.Contains("INSERT INTO tsalordr"), "No direct INSERT into tsalordr");
@@ -219,7 +221,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n7. Invoice creation uses SDK");
 
-            var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
+            var sageService = File.ReadAllText(SourceFile("SageService.cs"));
             Assert(sageService.Contains("public async Task<object> CreateInvoiceAsync"), "CreateInvoiceAsync exists");
             Assert(sageService.Contains("SDKInstanceManager.Instance.OpenSalesJournal()"), "Invoice creation uses SDK OpenSalesJournal");
             int invoiceStart = sageService.IndexOf("public async Task<object> CreateInvoiceAsync", StringComparison.Ordinal);
@@ -248,7 +250,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n9. Job result cloud contract");
 
-            var jobPoller = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\JobPoller.cs");
+            var jobPoller = File.ReadAllText(SourceFile("JobPoller.cs"));
             Assert(System.Text.RegularExpressions.Regex.IsMatch(jobPoller, @"new\s*\{\s*status,\s*sageId,\s*error\s*\}"),
                 "SubmitJobResult sends {status, sageId, error} matching the cloud API contract");
             Assert(!System.Text.RegularExpressions.Regex.IsMatch(jobPoller, @"new\s*\{\s*status,\s*result,\s*error\s*\}"),
@@ -271,7 +273,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n10. Sync payload field names match the cloud API");
 
-            var syncEngine = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SyncEngine.cs");
+            var syncEngine = File.ReadAllText(SourceFile("SyncEngine.cs"));
             Assert(syncEngine.Contains("Quotes = quotes"), "/sync/quotes sends 'Quotes' (capitalized) matching sync.ts's body.Quotes");
             Assert(syncEngine.Contains("InvoiceSummary = invoiceSummary"), "/sync/invoice-summary sends 'InvoiceSummary' matching sync.ts's body.InvoiceSummary");
             Assert(!System.Text.RegularExpressions.Regex.IsMatch(syncEngine, @"\bquotes\s*=\s*quotes\b"), "no lowercase 'quotes' sync field remains");
@@ -295,7 +297,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n11. Sync engine drives the provisioning state machine");
 
-            var syncEngine = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SyncEngine.cs");
+            var syncEngine = File.ReadAllText(SourceFile("SyncEngine.cs"));
             Assert(syncEngine.Contains("/connector/provisioning"), "SyncEngine reports provisioning progress to the cloud");
 
             var canonicalOrder = new[] { "checking_sage", "company_selected", "provisioning", "syncing_customers", "syncing_invoices", "syncing_products", "syncing_quotes", "finalizing", "ready" };
@@ -337,7 +339,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n12. Heartbeat is wired to the existing cloud endpoint");
 
-            var heartbeatSender = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\HeartbeatSender.cs");
+            var heartbeatSender = File.ReadAllText(SourceFile("HeartbeatSender.cs"));
             Assert(heartbeatSender.Contains("/connector/heartbeat"), "HeartbeatSender posts to the existing /connector/heartbeat endpoint");
             Assert(heartbeatSender.Contains("CloudAuthenticator"), "HeartbeatSender authenticates with the per-connector machine credential, not a human/Firebase identity");
             Assert(!System.Text.RegularExpressions.Regex.IsMatch(heartbeatSender, @"PostAsync\s*\(\s*""\/connector\/jobs"),
@@ -353,7 +355,7 @@ namespace SageBridge.Tests
 
             Assert(heartbeatSender.Contains("catch (Exception"), "Heartbeat failures are caught locally and cannot crash sync/job processing");
 
-            var program = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\Program.cs");
+            var program = File.ReadAllText(SourceFile("Program.cs"));
             Assert(program.Contains("new HeartbeatSender("), "Program.cs instantiates HeartbeatSender");
             Assert(program.Contains("heartbeatSender.Start()"), "Program.cs starts the heartbeat sender");
             Assert(program.Contains("heartbeatSender.Stop()"), "Program.cs stops the heartbeat sender on shutdown");
@@ -366,39 +368,36 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n8. No SQL writes against Sage tables");
 
-            var repositoryImpls = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositoryImpls.cs");
+            var repositoryImpls = File.ReadAllText(SourceFile("SageRepositoryImpls.cs"));
             Assert(!repositoryImpls.Contains("INSERT INTO"), "No INSERT statements in repository");
             Assert(!repositoryImpls.Contains("UPDATE ") || !repositoryImpls.Contains("SET"), "No UPDATE statements in repository");
             Assert(!repositoryImpls.Contains("DELETE FROM"), "No DELETE statements in repository");
 
-            var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
+            var sageService = File.ReadAllText(SourceFile("SageService.cs"));
             Assert(!sageService.Contains("INSERT INTO"), "No INSERT statements in SageService");
             Assert(!sageService.Contains("UPDATE ") || !sageService.Contains("SET"), "No UPDATE statements in SageService");
             Assert(!sageService.Contains("DELETE FROM"), "No DELETE statements in SageService");
         }
 
         // ---------------------------------------------------------------------------
-        // 13. Regression guard for verified Sage 50 Canada A/R behavior.
-        //     Gross invoice outstanding balance is the sum of every tCusTrDt.dAmount
-        //     attached to that invoice. Customer FIFO, pre-tax totals and dAmtOwg
-        //     must never determine final invoice balances.
+        // 13. Regression guard for the narrow Beta data contract.
+        //     Current balances and currency-normalized totals remain available;
+        //     SageBridge does not expose an aging or fake payment contract.
         // ---------------------------------------------------------------------------
         static void TestInvoiceBalancesUseGrossDetailSums()
         {
-            Console.WriteLine("\n13. Invoice list, summary and aging use gross per-invoice detail sums");
+            Console.WriteLine("\n13. Invoice contract keeps authoritative balances and removes derived fields");
 
-            var source = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositoryImpls.cs");
+            var source = File.ReadAllText(SourceFile("SageRepositoryImpls.cs"));
             int invoicesStart = source.IndexOf("public async Task<List<InvoiceRecord>> GetInvoicesAsync()");
-            int agingStart = source.IndexOf("public async Task<List<ARAgingRecord>> GetARAgingAsync()");
             int summaryStart = source.IndexOf("public async Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync()");
             int existsStart = source.IndexOf("public async Task<bool> InvoiceExistsAsync");
             int findLastStart = source.IndexOf("public async Task<InvoiceRecord?> FindLastCreatedInvoiceAsync");
 
-            Assert(invoicesStart >= 0 && agingStart > invoicesStart && summaryStart > agingStart && existsStart > summaryStart && findLastStart > existsStart,
+            Assert(invoicesStart >= 0 && summaryStart > invoicesStart && existsStart > summaryStart && findLastStart > existsStart,
                 "Invoice repository methods exist in the expected order");
 
-            string invoicesBody = source.Substring(invoicesStart, agingStart - invoicesStart);
-            string agingBody = source.Substring(agingStart, summaryStart - agingStart);
+            string invoicesBody = source.Substring(invoicesStart, summaryStart - invoicesStart);
             string summaryBody = source.Substring(summaryStart, existsStart - summaryStart);
             string findLastBody = source.Substring(findLastStart);
 
@@ -412,30 +411,31 @@ namespace SageBridge.Tests
                 "Invoice list normalizes sub-cent balance noise to zero");
             Assert(!invoicesBody.Contains("GREATEST(0, LEAST(") && !invoicesBody.Contains("nTranType IN (1, 2)") && !invoicesBody.Contains("dAmtOwg"),
                 "Invoice list has no FIFO, header netting or dAmtOwg balance logic");
+            Assert(!invoicesBody.Contains("DueDate") && !invoicesBody.Contains("Status = homeBalance"),
+                "Invoice list exposes no unavailable due date or derived payment status");
 
             Assert(summaryBody.Contains("dHomeTotal") && summaryBody.Contains("dTransactionTotal") &&
                    summaryBody.Contains("nTranType IN (0, 8, 9)"),
                 "Invoice summary uses home-currency A/R totals and includes type 8/9 adjustments");
             Assert(!summaryBody.Contains("dPreTaxAmt") && !summaryBody.Contains("GREATEST(0, LEAST(") && !summaryBody.Contains("dAmtOwg"),
                 "Invoice summary has no pre-tax, FIFO or dAmtOwg final-balance logic");
-
-            Assert(agingBody.Contains("dAmtHm") && agingBody.Contains("dHomeBalance") &&
-                   agingBody.Contains("nTranType IN (0, 8, 9)") && agingBody.Contains("AS dTotal"),
-                "Customer A/R totals and aging buckets use home currency and include type 8/9 adjustments");
-            Assert(!agingBody.Contains("dPreTaxAmt") && !agingBody.Contains("nTranType IN (1, 2)") && !agingBody.Contains("dAmtOwg"),
-                "A/R aging has no pre-tax, header netting or dAmtOwg final-balance logic");
+            Assert(!summaryBody.Contains("nPaid") && !summaryBody.Contains("nUnpaid"),
+                "Invoice summary exposes no derived paid/unpaid semantics");
 
             Assert(findLastBody.Contains("dAmtHm") && findLastBody.Contains("d.lCusTrId = h.lId") && !findLastBody.Contains("dAmtOwg"),
                 "Post-write invoice read-back keeps home and transaction currency balances");
 
-            Assert(!invoicesBody.Contains("dtDueDate"),
-                "Invoice reads do not query the unsupported dtDueDate column");
+            var repositories = File.ReadAllText(SourceFile("SageRepositories.cs"));
+            Assert(!repositories.Contains("DateTime? DueDate"), "InvoiceRecord removes the unavailable DueDate contract");
+            Assert(!repositories.Contains("ARAgingRecord") && !repositories.Contains("GetARAgingAsync"),
+                "Invoice contracts contain no aging model or repository method");
 
-            var repositories = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositories.cs");
-            Assert(repositories.Contains("DateTime? DueDate"), "InvoiceRecord retains its nullable DueDate contract");
-
-            var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
-            Assert(sageService.Contains("i.DueDate"), "SageService.GetInvoicesAsync retains the DueDate payload field");
+            var sageService = File.ReadAllText(SourceFile("SageService.cs"));
+            Assert(!sageService.Contains("i.DueDate") && !sageService.Contains("GetARAgingReportAsync"),
+                "SageService exposes no unavailable due date or aging projection");
+            Assert(!sageService.Contains("q.Balance") && !sageService.Contains("quote.Balance") &&
+                   !sageService.Contains("Status = \"Active\""),
+                "Quote and customer-create projections expose no unreliable derived fields");
         }
 
         // ---------------------------------------------------------------------------
@@ -446,7 +446,7 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n14. Customer balances use authoritative per-invoice detail sums");
 
-            var source = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageDataRepositoryImpls.cs");
+            var source = File.ReadAllText(SourceFile("SageDataRepositoryImpls.cs"));
             int listStart = source.IndexOf("public async Task<List<CustomerRecord>> GetCustomersAsync()");
             int idStart = source.IndexOf("public async Task<CustomerRecord?> GetCustomerByIdAsync");
             int nameStart = source.IndexOf("public async Task<CustomerRecord?> GetCustomerByNameAsync");
@@ -479,10 +479,10 @@ namespace SageBridge.Tests
         {
             Console.WriteLine("\n15. Currency-normalized read-side A/R and report adjustments");
 
-            var invoiceSource = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositoryImpls.cs");
-            var customerSource = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageDataRepositoryImpls.cs");
-            var contracts = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositories.cs");
-            var allConnectorSources = string.Join("\n", Directory.GetFiles(@"..\..\..\..\SageBridge.Connector", "*.cs")
+            var invoiceSource = File.ReadAllText(SourceFile("SageRepositoryImpls.cs"));
+            var customerSource = File.ReadAllText(SourceFile("SageDataRepositoryImpls.cs"));
+            var contracts = File.ReadAllText(SourceFile("SageRepositories.cs"));
+            var allConnectorSources = string.Join("\n", Directory.GetFiles(Path.GetDirectoryName(SourceFile("ApiServer.cs"))!, "*.cs")
                 .Select(File.ReadAllText));
 
             Assert(invoiceSource.Contains("dAmtHm") && invoiceSource.Contains("lCurrncyId"),

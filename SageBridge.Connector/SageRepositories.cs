@@ -16,8 +16,6 @@ namespace SageBridge.Connector
         public string QuoteNumber { get; set; }
         public DateTime? Date { get; set; }
         public decimal Total { get; set; }
-        public decimal Balance { get; set; }
-        public string Status { get; set; }
     }
 
     /// <summary>
@@ -32,7 +30,6 @@ namespace SageBridge.Connector
         public string InvoiceNumber { get; set; }
         public string Reference { get; set; }
         public DateTime? Date { get; set; }
-        public DateTime? DueDate { get; set; }
         public decimal PreTaxTotal { get; set; }
         // Total and Balance are home/reporting-currency values.
         public decimal Total { get; set; }
@@ -41,27 +38,10 @@ namespace SageBridge.Connector
         public decimal TransactionCurrencyBalance { get; set; }
         public decimal HomeCurrencyTotal { get; set; }
         public decimal HomeCurrencyBalance { get; set; }
-        public string Status { get; set; }
     }
 
     /// <summary>
-    /// Represents an AR aging bucket for a customer.
-    /// </summary>
-    public class ARAgingRecord
-    {
-        public string CustomerId { get; set; }
-        public string CustomerName { get; set; }
-        public string Contact { get; set; }
-        public string Phone { get; set; }
-        public decimal Total { get; set; }
-        public decimal Current { get; set; }
-        public decimal Days30_60 { get; set; }
-        public decimal Days60_90 { get; set; }
-        public decimal Over90 { get; set; }
-    }
-
-    /// <summary>
-    /// Represents a summary of invoice totals by status.
+    /// Represents safe aggregations of authoritative invoice balances.
     /// </summary>
     public class InvoiceSummaryRecord
     {
@@ -70,8 +50,6 @@ namespace SageBridge.Connector
         public decimal TotalAmount { get; set; }
         public decimal TransactionCurrencyTotal { get; set; }
         public decimal HomeCurrencyTotal { get; set; }
-        public int PaidCount { get; set; }
-        public int UnpaidCount { get; set; }
     }
 
     /// <summary>
@@ -116,12 +94,7 @@ namespace SageBridge.Connector
         Task<List<InvoiceRecord>> GetInvoicesAsync();
 
         /// <summary>
-        /// Get AR aging report showing outstanding balances by customer.
-        /// </summary>
-        Task<List<ARAgingRecord>> GetARAgingAsync();
-
-        /// <summary>
-        /// Get a summary of invoice totals by paid/unpaid status.
+        /// Get safe aggregations of authoritative invoice balances.
         /// </summary>
         Task<InvoiceSummaryRecord> GetInvoiceSummaryAsync();
 

@@ -293,22 +293,6 @@ namespace SageBridge.Connector
         private SageService Sage => Startup.SageService!;
 
         [HttpGet]
-        [Route("api/reports/ar-aging")]
-        public async Task<IHttpActionResult> ArAging()
-        {
-            try
-            {
-                var report = await Sage.GetARAgingReportAsync();
-                return Ok(new { report });
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Error getting AR aging report");
-                return InternalServerError(ex);
-            }
-        }
-
-        [HttpGet]
         [Route("api/reports/invoice-summary")]
         public async Task<IHttpActionResult> InvoiceSummary()
         {
