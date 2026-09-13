@@ -222,12 +222,14 @@ namespace SageBridge.Tests
             Assert(sageService.Contains("public async Task<object> CreateInvoiceAsync"), "CreateInvoiceAsync exists");
             Assert(sageService.Contains("SDKInstanceManager.Instance.OpenSalesJournal()"), "Invoice creation uses SDK OpenSalesJournal");
             int invoiceStart = sageService.IndexOf("public async Task<object> CreateInvoiceAsync", StringComparison.Ordinal);
-            int invoiceEnd = sageService.IndexOf("// Post() has committed the write", invoiceStart, StringComparison.Ordinal);
+            int invoiceEnd = sageService.IndexOf("return new\r\n            {", invoiceStart, StringComparison.Ordinal);
             string invoiceMethod = invoiceStart >= 0 && invoiceEnd > invoiceStart
                 ? sageService.Substring(invoiceStart, invoiceEnd - invoiceStart)
                 : string.Empty;
             Assert(invoiceMethod.Contains("SetQuantity"), "Sales invoice lines use the SDK quantity field");
             Assert(!invoiceMethod.Contains("SetOrdered"), "Sales invoice lines do not use the order-only ordered field");
+            Assert(invoiceMethod.Contains("Task.Delay"), "Invoice read-back retries after Sage Post()");
+            Assert(invoiceMethod.Contains("FindLastCreatedInvoiceAsync"), "Invoice read-back uses the repository after retry delay");
             // Invoice creation must never re-throw after Post() succeeds - a thrown
             // exception there would be misread as "the write failed" upstream and
             // trigger a retry that double-posts the invoice.

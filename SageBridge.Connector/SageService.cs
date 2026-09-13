@@ -525,7 +525,14 @@ namespace SageBridge.Connector
             string invoiceNumber = string.Empty;
             try
             {
-                var created = await _invoiceRepository.FindLastCreatedInvoiceAsync(customerName);
+                InvoiceRecord? created = null;
+                for (int attempt = 0; attempt < 3 && created == null; attempt++)
+                {
+                    if (attempt > 0)
+                        await Task.Delay(TimeSpan.FromSeconds(1));
+
+                    created = await _invoiceRepository.FindLastCreatedInvoiceAsync(customerName);
+                }
                 if (created != null)
                 {
                     id = created.Id;
