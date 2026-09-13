@@ -438,7 +438,7 @@ namespace SageBridge.Connector
         /// more existing items, following the same SalesJournal SDK pattern
         /// as CreateQuoteAsync (OpenSalesJournal; SelectTransType;
         /// SelectAPARLedger; SetShipDate(GetJournalDate()); per-line
-        /// SetItemNumber/SetOrdered/SetPrice; Post(); CloseSalesJournal in
+        /// SetItemNumber/SetQuantity/SetPrice; Post(); CloseSalesJournal in
         /// finally). Does not set tax manually and does not set revenue
         /// accounts unless the SDK forces it - identical scope to
         /// CreateQuoteAsync's write path.
@@ -500,7 +500,7 @@ namespace SageBridge.Connector
                 {
                     lineIndex++;
                     salJourn.SetItemNumber(line.Sku, lineIndex);
-                    salJourn.SetOrdered((double)line.Quantity, lineIndex);
+                    salJourn.SetQuantity((double)line.Quantity, lineIndex);
                     salJourn.SetPrice((double)line.UnitPrice, lineIndex);
                 }
 
