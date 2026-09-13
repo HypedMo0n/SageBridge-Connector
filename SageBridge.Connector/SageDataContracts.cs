@@ -20,7 +20,9 @@ namespace SageBridge.Connector
         public string Fax { get; set; }
         public string Address { get; set; }
         public decimal CreditLimit { get; set; }
+        // Balance is the home/reporting-currency customer A/R balance.
         public decimal Balance { get; set; }
+        public decimal HomeCurrencyBalance { get; set; }
         public string Status { get; set; }
     }
 

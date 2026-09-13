@@ -40,14 +40,18 @@ namespace SageBridge.Connector
 SELECT c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
        c.sProvState, c.sCountry, c.sPostalZip, c.sPhone1, c.sPhone2,
        c.sFax, c.sEmail, c.dCrLimit, c.bInactive,
-       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 THEN i.dBalance ELSE 0 END), 0) AS dBalance
+       COALESCE(SUM(CASE WHEN (i.nTranType = 0 AND i.dHomeBalance >= 0.005)
+                              OR i.nTranType IN (8, 9)
+                         THEN i.dHomeBalance ELSE 0 END), 0) AS dBalance
 FROM tCustomr c
 LEFT JOIN (
-    SELECT h.lId, h.lCusId, SUM(d.dAmount) AS dBalance
+    SELECT h.lId, h.lCusId, h.nTranType,
+           COALESCE(SUM(d.dAmount), 0) AS dTransactionBalance,
+           COALESCE(SUM(CASE WHEN h.lCurrncyId = 1 THEN d.dAmount ELSE d.dAmtHm END), 0) AS dHomeBalance
     FROM tCusTr h
     LEFT JOIN tCusTrDt d ON d.lCusTrId = h.lId
-    WHERE h.nTranType = 0
-    GROUP BY h.lId, h.lCusId
+    WHERE h.nTranType IN (0, 8, 9)
+    GROUP BY h.lId, h.lCusId, h.nTranType
 ) i ON i.lCusId = c.lId
 GROUP BY c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
          c.sProvState, c.sCountry, c.sPostalZip, c.sPhone1, c.sPhone2,
@@ -71,6 +75,7 @@ ORDER BY c.sName";
                     Address = JoinAddress(row, "sStreet1", "sStreet2", "sCity", "sProvState", "sPostalZip", "sCountry"),
                     CreditLimit = GetDecimal(row, "dCrLimit"),
                     Balance = GetDecimal(row, "dBalance"),
+                    HomeCurrencyBalance = GetDecimal(row, "dBalance"),
                     Status = GetBoolean(row, "bInactive") ? "Inactive" : "Active"
                 });
             }
@@ -91,14 +96,18 @@ ORDER BY c.sName";
 SELECT c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
        c.sProvState, c.sCountry, c.sPostalZip, c.sPhone1, c.sPhone2,
        c.sFax, c.sEmail, c.dCrLimit, c.bInactive,
-       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 THEN i.dBalance ELSE 0 END), 0) AS dBalance
+       COALESCE(SUM(CASE WHEN (i.nTranType = 0 AND i.dHomeBalance >= 0.005)
+                              OR i.nTranType IN (8, 9)
+                         THEN i.dHomeBalance ELSE 0 END), 0) AS dBalance
 FROM tCustomr c
 LEFT JOIN (
-    SELECT h.lId, h.lCusId, SUM(d.dAmount) AS dBalance
+    SELECT h.lId, h.lCusId, h.nTranType,
+           COALESCE(SUM(d.dAmount), 0) AS dTransactionBalance,
+           COALESCE(SUM(CASE WHEN h.lCurrncyId = 1 THEN d.dAmount ELSE d.dAmtHm END), 0) AS dHomeBalance
     FROM tCusTr h
     LEFT JOIN tCusTrDt d ON d.lCusTrId = h.lId
-    WHERE h.nTranType = 0
-    GROUP BY h.lId, h.lCusId
+    WHERE h.nTranType IN (0, 8, 9)
+    GROUP BY h.lId, h.lCusId, h.nTranType
 ) i ON i.lCusId = c.lId
 WHERE c.lId = {customerId}
 GROUP BY c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
@@ -123,6 +132,7 @@ GROUP BY c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
                 Address = JoinAddress(row, "sStreet1", "sStreet2", "sCity", "sProvState", "sPostalZip", "sCountry"),
                 CreditLimit = GetDecimal(row, "dCrLimit"),
                 Balance = GetDecimal(row, "dBalance"),
+                HomeCurrencyBalance = GetDecimal(row, "dBalance"),
                 Status = GetBoolean(row, "bInactive") ? "Inactive" : "Active"
             };
         }
@@ -140,14 +150,18 @@ GROUP BY c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
 SELECT c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
        c.sProvState, c.sCountry, c.sPostalZip, c.sPhone1, c.sPhone2,
        c.sFax, c.sEmail, c.dCrLimit, c.bInactive,
-       COALESCE(SUM(CASE WHEN i.dBalance >= 0.005 THEN i.dBalance ELSE 0 END), 0) AS dBalance
+       COALESCE(SUM(CASE WHEN (i.nTranType = 0 AND i.dHomeBalance >= 0.005)
+                              OR i.nTranType IN (8, 9)
+                         THEN i.dHomeBalance ELSE 0 END), 0) AS dBalance
 FROM tCustomr c
 LEFT JOIN (
-    SELECT h.lId, h.lCusId, SUM(d.dAmount) AS dBalance
+    SELECT h.lId, h.lCusId, h.nTranType,
+           COALESCE(SUM(d.dAmount), 0) AS dTransactionBalance,
+           COALESCE(SUM(CASE WHEN h.lCurrncyId = 1 THEN d.dAmount ELSE d.dAmtHm END), 0) AS dHomeBalance
     FROM tCusTr h
     LEFT JOIN tCusTrDt d ON d.lCusTrId = h.lId
-    WHERE h.nTranType = 0
-    GROUP BY h.lId, h.lCusId
+    WHERE h.nTranType IN (0, 8, 9)
+    GROUP BY h.lId, h.lCusId, h.nTranType
 ) i ON i.lCusId = c.lId
 WHERE c.sName = '{SanitizeSql(name.Trim())}'
 GROUP BY c.lId, c.sName, c.sCntcName, c.sStreet1, c.sStreet2, c.sCity,
@@ -173,6 +187,7 @@ ORDER BY c.sName";
                 Address = JoinAddress(row, "sStreet1", "sStreet2", "sCity", "sProvState", "sPostalZip", "sCountry"),
                 CreditLimit = GetDecimal(row, "dCrLimit"),
                 Balance = GetDecimal(row, "dBalance"),
+                HomeCurrencyBalance = GetDecimal(row, "dBalance"),
                 Status = GetBoolean(row, "bInactive") ? "Inactive" : "Active"
             };
         }

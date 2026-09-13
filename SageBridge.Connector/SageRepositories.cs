@@ -34,8 +34,13 @@ namespace SageBridge.Connector
         public DateTime? Date { get; set; }
         public DateTime? DueDate { get; set; }
         public decimal PreTaxTotal { get; set; }
+        // Total and Balance are home/reporting-currency values.
         public decimal Total { get; set; }
         public decimal Balance { get; set; }
+        public decimal TransactionCurrencyTotal { get; set; }
+        public decimal TransactionCurrencyBalance { get; set; }
+        public decimal HomeCurrencyTotal { get; set; }
+        public decimal HomeCurrencyBalance { get; set; }
         public string Status { get; set; }
     }
 
@@ -61,7 +66,10 @@ namespace SageBridge.Connector
     public class InvoiceSummaryRecord
     {
         public int TotalCount { get; set; }
+        // TotalAmount is the home/reporting-currency A/R total.
         public decimal TotalAmount { get; set; }
+        public decimal TransactionCurrencyTotal { get; set; }
+        public decimal HomeCurrencyTotal { get; set; }
         public int PaidCount { get; set; }
         public int UnpaidCount { get; set; }
     }

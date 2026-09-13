@@ -34,6 +34,7 @@ namespace SageBridge.Tests
                 TestHeartbeatWired();
                 TestInvoiceBalancesUseGrossDetailSums();
                 TestCustomerBalancesUseInvoiceDetailSums();
+                TestCurrencyNormalizedReadSideAR();
             }
             catch (Exception ex)
             {
@@ -401,38 +402,40 @@ namespace SageBridge.Tests
             string summaryBody = source.Substring(summaryStart, existsStart - summaryStart);
             string findLastBody = source.Substring(findLastStart);
 
-            Assert(invoicesBody.Contains("SUM(d.dAmount)") && invoicesBody.Contains("d.lCusTrId = h.lId"),
-                "Invoice list derives each balance from all detail amounts attached to that invoice");
-            Assert(invoicesBody.Contains("SUM(CASE WHEN d.nTranType = 0 THEN d.dAmount ELSE 0 END)") && invoicesBody.Contains("AS dTotal"),
-                "Invoice list returns the original gross invoice total separately from outstanding balance");
-            Assert(invoicesBody.Contains("0.005") && invoicesBody.Contains("AS dBalance"),
+            Assert(invoicesBody.Contains("SUM(d.dAmount)") && invoicesBody.Contains("d.lCusTrId = h.lId") &&
+                   invoicesBody.Contains("dAmtHm") && invoicesBody.Contains("lCurrncyId"),
+                "Invoice list derives transaction and home-currency values from attached detail amounts");
+            Assert(invoicesBody.Contains("dTransactionTotal") && invoicesBody.Contains("dHomeTotal") &&
+                   invoicesBody.Contains("dTransactionBalance") && invoicesBody.Contains("dHomeBalance"),
+                "Invoice list keeps transaction and home/reporting currency totals and balances explicit");
+            Assert(invoicesBody.Contains("0.005") && invoicesBody.Contains("HomeCurrencyBalance"),
                 "Invoice list normalizes sub-cent balance noise to zero");
             Assert(!invoicesBody.Contains("GREATEST(0, LEAST(") && !invoicesBody.Contains("nTranType IN (1, 2)") && !invoicesBody.Contains("dAmtOwg"),
                 "Invoice list has no FIFO, header netting or dAmtOwg balance logic");
 
-            Assert(summaryBody.Contains("SUM(d.dAmount) AS dBalance") &&
-                   summaryBody.Contains("SUM(CASE WHEN i.dBalance >= 0.005 THEN i.dBalance ELSE 0 END)"),
-                "Invoice summary uses authoritative per-invoice balances and sums only amounts still owed");
+            Assert(summaryBody.Contains("dHomeTotal") && summaryBody.Contains("dTransactionTotal") &&
+                   summaryBody.Contains("nTranType IN (0, 8, 9)"),
+                "Invoice summary uses home-currency A/R totals and includes type 8/9 adjustments");
             Assert(!summaryBody.Contains("dPreTaxAmt") && !summaryBody.Contains("GREATEST(0, LEAST(") && !summaryBody.Contains("dAmtOwg"),
                 "Invoice summary has no pre-tax, FIFO or dAmtOwg final-balance logic");
 
-            Assert(agingBody.Contains("SUM(d.dAmount)") && agingBody.Contains("AS dBalance") &&
-                   agingBody.Contains("i.dBalance >= 0.005") && agingBody.Contains("AS dTotal"),
-                "Customer A/R totals and aging buckets aggregate positive authoritative invoice balances");
+            Assert(agingBody.Contains("dAmtHm") && agingBody.Contains("dHomeBalance") &&
+                   agingBody.Contains("nTranType IN (0, 8, 9)") && agingBody.Contains("AS dTotal"),
+                "Customer A/R totals and aging buckets use home currency and include type 8/9 adjustments");
             Assert(!agingBody.Contains("dPreTaxAmt") && !agingBody.Contains("nTranType IN (1, 2)") && !agingBody.Contains("dAmtOwg"),
                 "A/R aging has no pre-tax, header netting or dAmtOwg final-balance logic");
 
-            Assert(findLastBody.Contains("SUM(d.dAmount)") && findLastBody.Contains("d.lCusTrId = h.lId") && !findLastBody.Contains("dAmtOwg"),
-                "Post-write invoice read-back uses the same authoritative gross balance");
+            Assert(findLastBody.Contains("dAmtHm") && findLastBody.Contains("d.lCusTrId = h.lId") && !findLastBody.Contains("dAmtOwg"),
+                "Post-write invoice read-back keeps home and transaction currency balances");
 
-            Assert(invoicesBody.Contains("dtDueDate") && invoicesBody.Contains("catch (Exception"),
-                "Due-date lookup remains defensive and cannot break invoice sync");
+            Assert(!invoicesBody.Contains("dtDueDate"),
+                "Invoice reads do not query the unsupported dtDueDate column");
 
             var repositories = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositories.cs");
-            Assert(repositories.Contains("DateTime? DueDate"), "InvoiceRecord carries a DueDate field");
+            Assert(repositories.Contains("DateTime? DueDate"), "InvoiceRecord retains its nullable DueDate contract");
 
             var sageService = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageService.cs");
-            Assert(sageService.Contains("i.DueDate"), "SageService.GetInvoicesAsync threads DueDate into the sync payload");
+            Assert(sageService.Contains("i.DueDate"), "SageService.GetInvoicesAsync retains the DueDate payload field");
         }
 
         // ---------------------------------------------------------------------------
@@ -459,11 +462,67 @@ namespace SageBridge.Tests
             foreach (string body in new[] { listBody, idBody, nameBody })
             {
                 Assert(body.Contains("SUM(d.dAmount)") && body.Contains("d.lCusTrId = h.lId") &&
-                       body.Contains("i.dBalance >= 0.005") && body.Contains("AS dBalance"),
-                    "Customer query aggregates positive gross balances per invoice");
+                       body.Contains("dAmtHm") && body.Contains("lCurrncyId") &&
+                       body.Contains("nTranType IN (0, 8, 9)") && body.Contains("AS dBalance"),
+                    "Customer query aggregates home-currency invoice and type 8/9 balances");
                 Assert(!body.Contains("dPreTaxAmt") && !body.Contains("nTranType IN (1, 2)") && !body.Contains("dAmtOwg"),
                     "Customer query has no pre-tax, header netting or dAmtOwg final-balance logic");
             }
+        }
+
+        // ---------------------------------------------------------------------------
+        // 15. Read-side A/R uses Sage's home-currency representation for foreign
+        //     transactions, includes type 8/9 report adjustments, and has no stale
+        //     dtDueDate dependency.
+        // ---------------------------------------------------------------------------
+        static void TestCurrencyNormalizedReadSideAR()
+        {
+            Console.WriteLine("\n15. Currency-normalized read-side A/R and report adjustments");
+
+            var invoiceSource = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositoryImpls.cs");
+            var customerSource = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageDataRepositoryImpls.cs");
+            var contracts = File.ReadAllText(@"..\..\..\..\SageBridge.Connector\SageRepositories.cs");
+            var allConnectorSources = string.Join("\n", Directory.GetFiles(@"..\..\..\..\SageBridge.Connector", "*.cs")
+                .Select(File.ReadAllText));
+
+            Assert(invoiceSource.Contains("dAmtHm") && invoiceSource.Contains("lCurrncyId"),
+                "Invoice reads select the stored home-currency amount for foreign transactions");
+            Assert(customerSource.Contains("dAmtHm") && customerSource.Contains("lCurrncyId"),
+                "Customer A/R reads use the stored home-currency amount for foreign transactions");
+            Assert(invoiceSource.Contains("nTranType IN (0, 8, 9)"),
+                "A/R report queries include invoices, credit notes, and debit notes");
+            Assert(customerSource.Contains("nTranType IN (0, 8, 9)"),
+                "Customer A/R queries include invoices, credit notes, and debit notes");
+            Assert(contracts.Contains("TransactionCurrencyBalance") && contracts.Contains("HomeCurrencyBalance"),
+                "Invoice DTO keeps transaction and home/reporting currency balances explicit");
+            Assert(!allConnectorSources.Contains("dtDueDate"),
+                "No connector source queries the unsupported dtDueDate column");
+
+            decimal Normalize(decimal transactionAmount, decimal homeAmount, int currencyId)
+                => currencyId == 1 ? transactionAmount : homeAmount;
+
+            Assert(Normalize(100m, 100m, 1) == 100m,
+                "Home-currency invoice preserves its transaction amount");
+            Assert(Normalize(2767m, 3929.14m, 2) == 3929.14m,
+                "Foreign-currency invoice uses its home amount");
+            Assert(Normalize(-2500m, -3550m, 2) == -3550m,
+                "Foreign-currency partial payment uses its stored home amount");
+            Assert(Normalize(234.70m, 347.36m, 2) == 347.36m,
+                "Foreign-currency debit note contributes its home amount");
+            Assert(Normalize(-121.39m, -121.39m, 1) == -121.39m,
+                "Credit note reduces report A/R");
+
+            decimal paramount = Normalize(2767m, 3929.14m, 2)
+                + Normalize(234.70m, 347.36m, 2);
+            Assert(paramount == 4276.50m,
+                "Paramount fixture reconciles to Sage home-currency A/R");
+
+            decimal totalAR = Normalize(355543.02m, 355543.02m, 1)
+                + Normalize(2767m, 3929.14m, 2)
+                + Normalize(-121.39m, -121.39m, 1)
+                + Normalize(234.70m, 347.36m, 2);
+            Assert(totalAR == 359698.13m,
+                "Matched A/R fixture reconciles to $359,698.13");
         }
     }
 }

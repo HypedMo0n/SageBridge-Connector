@@ -153,6 +153,7 @@ namespace SageBridge.Connector
                 c.Address,
                 c.CreditLimit,
                 c.Balance,
+                c.HomeCurrencyBalance,
                 c.Status
             }).ToList();
         }
@@ -182,6 +183,7 @@ namespace SageBridge.Connector
                 customer.Address,
                 customer.CreditLimit,
                 customer.Balance,
+                customer.HomeCurrencyBalance,
                 customer.Status
             };
         }
@@ -205,6 +207,10 @@ namespace SageBridge.Connector
                 i.PreTaxTotal,
                 i.Total,
                 i.Balance,
+                i.TransactionCurrencyTotal,
+                i.TransactionCurrencyBalance,
+                i.HomeCurrencyTotal,
+                i.HomeCurrencyBalance,
                 i.Status
             }).ToList();
         }
@@ -634,6 +640,8 @@ namespace SageBridge.Connector
             {
                 summary.TotalCount,
                 summary.TotalAmount,
+                summary.TransactionCurrencyTotal,
+                summary.HomeCurrencyTotal,
                 summary.PaidCount,
                 summary.UnpaidCount
             };
@@ -664,6 +672,7 @@ namespace SageBridge.Connector
                 customer.Address,
                 customer.CreditLimit,
                 customer.Balance,
+                customer.HomeCurrencyBalance,
                 customer.Status
             };
         }
@@ -740,6 +749,7 @@ namespace SageBridge.Connector
                 Address = JoinAddress(row, "sStreet1", "sStreet2", "sCity", "sProvState", "sPostalZip", "sCountry"),
                 CreditLimit = DecimalValue(row, "dCrLimit"),
                 Balance = DecimalValue(row, "dBalance"),
+                HomeCurrencyBalance = DecimalValue(row, "dBalance"),
                 Status = BooleanValue(row, "bInactive") ? "Inactive" : "Active"
             };
         }
