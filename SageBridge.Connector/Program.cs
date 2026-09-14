@@ -26,6 +26,10 @@ namespace SageBridge.Connector
 
                 // Initialize components
                 var config = ConnectorConfig.Load();
+                var companyProfiles = config.ResolveCompanyProfiles();
+                if (companyProfiles.Count == 0)
+                    throw new InvalidOperationException("No enabled Sage company profiles are configured.");
+
                 using var sageService = new SageService(config);
                 var apiServer = new ApiServer(config, sageService);
                 var syncEngine = new SyncEngine(config, sageService);
@@ -58,16 +62,32 @@ namespace SageBridge.Connector
                 await apiServer.StartAsync();
                 Log.Information("✓ REST API started on http://localhost:{Port}", config.ApiPort);
 
-                // Connect to Sage 50
-                var connected = await sageService.ConnectAsync();
-                if (!connected)
+                // Verify every configured Sage/cloud binding before background work starts.
+                // SimplySDK supports one database per process, so this intentionally
+                // closes and reopens the SDK session for each profile in sequence.
+                var connectedCompanies = 0;
+                foreach (var profile in companyProfiles)
                 {
-                    Log.Error("✗ Failed to connect to Sage 50");
-                    Log.Information("Make sure Sage 50 is installed and a company is open");
+                    if (await sageService.ConnectAsync(profile))
+                    {
+                        connectedCompanies++;
+                        Log.Information("Connected cloud company {CompanyId} to Sage company {CompanyName}",
+                            profile.CloudCompanyId, sageService.CompanyName);
+                    }
+                    else
+                    {
+                        Log.Error("Could not open Sage profile for cloud company {CompanyId}", profile.CloudCompanyId);
+                    }
+                }
+
+                if (connectedCompanies == 0)
+                {
+                    Log.Error("Failed to connect any configured Sage 50 company");
+                    Log.Information("Confirm each configured .SAI path and Sage credential, then restart the connector");
                     Console.ReadLine();
                     return;
                 }
-                Log.Information("✓ Connected to Sage 50: {CompanyName}", sageService.CompanyName);
+                Log.Information("Verified {Connected}/{Configured} Sage company binding(s)", connectedCompanies, companyProfiles.Count);
 
                 // Establish Cloudflare Tunnel (optional for POC)
                 if (config.EnableCloudflare)

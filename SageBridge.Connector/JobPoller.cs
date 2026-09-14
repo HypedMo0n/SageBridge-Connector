@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -15,6 +16,7 @@ namespace SageBridge.Connector
         private readonly ConnectorConfig _config;
         private readonly SageService _sageService;
         private readonly CloudAuthenticator _auth;
+        private readonly IReadOnlyList<SageCompanyProfile> _profiles;
         private readonly Dictionary<string, bool> _processedJobs;
         private readonly HashSet<string> _completedIdempotencyKeys;
         private OperationLedger _ledger;
@@ -25,7 +27,9 @@ namespace SageBridge.Connector
         {
             _config = config;
             _sageService = sageService;
-            _auth = new CloudAuthenticator(config.CloudflareWorkerUrl, config.TenantId, config.CompanyId);
+            _profiles = config.ResolveCompanyProfiles();
+            var defaultCompanyId = _profiles.FirstOrDefault()?.CloudCompanyId ?? config.CompanyId;
+            _auth = new CloudAuthenticator(config.CloudflareWorkerUrl, config.TenantId, defaultCompanyId);
             _processedJobs = new Dictionary<string, bool>();
             _completedIdempotencyKeys = new HashSet<string>();
         }
@@ -38,7 +42,6 @@ namespace SageBridge.Connector
                 "operation_ledger.db");
             _ledger = new OperationLedger(ledgerPath);
             Log.Information("Operation ledger initialized at {Path}", ledgerPath);
-            ReconcileUncertainOperations();
             _cancellationToken = new CancellationTokenSource();
             _pollingTask = Task.Run(() => PollLoop(_cancellationToken.Token));
         }
@@ -51,14 +54,14 @@ namespace SageBridge.Connector
             _ledger?.Dispose();
         }
 
-        private void ReconcileUncertainOperations()
+        private void ReconcileUncertainOperations(SageCompanyProfile profile)
         {
             Log.Information("Reconciling uncertain operations from previous session...");
             try
             {
-                FlushPendingResults().GetAwaiter().GetResult();
-
-                var uncertainOps = _ledger.GetOperationsByState("processing");
+                var uncertainOps = _ledger.GetOperationsByState("processing")
+                    .Where(op => string.Equals(op.CompanyId, profile.CloudCompanyId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
                 foreach (var op in uncertainOps)
                 {
                     Log.Information("Found uncertain operation: {Key} - checking Sage", op.IdempotencyKey);
@@ -154,12 +157,12 @@ namespace SageBridge.Connector
                 return;
             }
 
-            await MarkJobStarted(op.JobId);
-            var delivered = await SubmitJobResult(op.JobId, "succeeded", op.SageRecordId, null);
+            await MarkJobStarted(op.JobId, op.CompanyId);
+            var delivered = await SubmitJobResult(op.JobId, "succeeded", op.SageRecordId, null, op.CompanyId);
             if (delivered)
             {
                 _ledger.MarkSucceeded(op.IdempotencyKey, op.CompanyId);
-                _completedIdempotencyKeys.Add(op.IdempotencyKey);
+                _completedIdempotencyKeys.Add(ScopeKey(op.CompanyId, op.IdempotencyKey));
                 Log.Information(
                     "Delivered previously-pending result for {Key} (SageRecordId {Id})",
                     op.IdempotencyKey, op.SageRecordId);
@@ -180,12 +183,14 @@ namespace SageBridge.Connector
         /// after its claim expires (up to 2 minutes), which would otherwise
         /// leave a known-good result undelivered for that whole window.
         /// </summary>
-        private async Task FlushPendingResults()
+        private async Task FlushPendingResults(SageCompanyProfile profile)
         {
             List<OperationRecord> pending;
             try
             {
-                pending = _ledger.GetOperationsByState("result_pending");
+                pending = _ledger.GetOperationsByState("result_pending")
+                    .Where(op => string.Equals(op.CompanyId, profile.CloudCompanyId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
             }
             catch (Exception ex)
             {
@@ -195,7 +200,7 @@ namespace SageBridge.Connector
 
             foreach (var op in pending)
             {
-                if (_completedIdempotencyKeys.Contains(op.IdempotencyKey))
+                if (_completedIdempotencyKeys.Contains(ScopeKey(op.CompanyId, op.IdempotencyKey)))
                     continue;
                 await RetryResultDelivery(op);
             }
@@ -220,7 +225,22 @@ namespace SageBridge.Connector
             {
                 try
                 {
-                    await PollAndProcessJobs();
+                    foreach (var profile in _profiles)
+                    {
+                        try
+                        {
+                            await _sageService.RunForCompanyAsync(profile, async () =>
+                            {
+                                ReconcileUncertainOperations(profile);
+                                await FlushPendingResults(profile);
+                                await PollAndProcessJobs(profile);
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(ex, "Job polling failed for cloud company {CompanyId}", profile.CloudCompanyId);
+                        }
+                    }
                     await Task.Delay(3000, cancellationToken); // Poll every 3 seconds
                 }
                 catch (TaskCanceledException)
@@ -235,7 +255,7 @@ namespace SageBridge.Connector
             }
         }
 
-        private async Task PollAndProcessJobs()
+        private async Task PollAndProcessJobs(SageCompanyProfile profile)
         {
             if (!_config.EnableCloudflare || string.IsNullOrEmpty(_config.CloudflareWorkerUrl))
             {
@@ -250,7 +270,7 @@ namespace SageBridge.Connector
 
             try
             {
-                var response = await _auth.GetAsync("/connector/jobs");
+                var response = await _auth.GetAsync("/connector/jobs", profile.CloudCompanyId);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -271,7 +291,7 @@ namespace SageBridge.Connector
 
                 foreach (var job in jobs)
                 {
-                    await ProcessJob(job);
+                    await ProcessJob(job, profile);
                 }
             }
             catch (Exception ex)
@@ -280,7 +300,7 @@ namespace SageBridge.Connector
             }
         }
 
-        private async Task ProcessJob(Job job)
+        private async Task ProcessJob(Job job, SageCompanyProfile profile)
         {
             try
             {
@@ -293,10 +313,19 @@ namespace SageBridge.Connector
                     return;
                 }
 
-                var companyId = _config.CompanyId ?? "default";
+                var companyId = profile.CloudCompanyId;
+                if (!string.Equals(job.CompanyId, companyId, StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.Error("Job {JobId} company {JobCompanyId} does not match polled company {CompanyId}; refusing Sage write",
+                        job.JobId, job.CompanyId, companyId);
+                    return;
+                }
+                if (!string.Equals(_sageService.CurrentCloudCompanyId, companyId, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Sage SDK session is not bound to the job company.");
+
                 var action = job.Action;
 
-                if (_completedIdempotencyKeys.Contains(idempotencyKey))
+                if (_completedIdempotencyKeys.Contains(ScopeKey(companyId, idempotencyKey)))
                 {
                     Log.Information("Job {JobId} with idempotencyKey {Key} already completed - skipping",
                         job.JobId, idempotencyKey);
@@ -334,7 +363,7 @@ namespace SageBridge.Connector
                             {
                                 var reconciledSageId = existingCustomer.GetType().GetProperty("Id")?.GetValue(existingCustomer)?.ToString();
                                 _ledger.MarkSucceeded(idempotencyKey, companyId);
-                                _completedIdempotencyKeys.Add(idempotencyKey);
+                                _completedIdempotencyKeys.Add(ScopeKey(companyId, idempotencyKey));
                                 Log.Information("Reconciled: customer exists in Sage (ID: {Id})", reconciledSageId);
                             }
                             else
@@ -376,7 +405,7 @@ namespace SageBridge.Connector
                 _ledger.CreateOperation(idempotencyKey, companyId, action, hash, payloadJson, job.JobId);
                 Log.Information("Recorded operation in ledger: {Key}", idempotencyKey);
 
-                await MarkJobStarted(job.JobId);
+                await MarkJobStarted(job.JobId, companyId);
 
                 object result = null;
                 string error = null;
@@ -424,14 +453,14 @@ namespace SageBridge.Connector
                     _ledger.MarkFailed(idempotencyKey, companyId);
                 }
 
-                var delivered = await SubmitJobResult(job.JobId, status, sageId, error);
+                var delivered = await SubmitJobResult(job.JobId, status, sageId, error, companyId);
 
                 if (status == "succeeded")
                 {
                     if (delivered)
                     {
                         _ledger.MarkSucceeded(idempotencyKey, companyId);
-                        _completedIdempotencyKeys.Add(idempotencyKey);
+                        _completedIdempotencyKeys.Add(ScopeKey(companyId, idempotencyKey));
                         Log.Information("IdempotencyKey {Key} recorded as succeeded", idempotencyKey);
                     }
                     else
@@ -444,6 +473,11 @@ namespace SageBridge.Connector
             {
                 Log.Error(ex, "Fatal error processing job {JobId}", job.JobId);
             }
+        }
+
+        private static string ScopeKey(string companyId, string idempotencyKey)
+        {
+            return companyId + ":" + idempotencyKey;
         }
 
         private string GetCustomerName(OperationRecord op)
@@ -594,11 +628,11 @@ namespace SageBridge.Connector
             return result;
         }
 
-        private async Task MarkJobStarted(string jobId)
+        private async Task MarkJobStarted(string jobId, string companyId)
         {
             try
             {
-                await _auth.PostAsync($"/connector/jobs/{jobId}/start", new { });
+                await _auth.PostAsync($"/connector/jobs/{jobId}/start", new { }, companyId);
             }
             catch (Exception ex)
             {
@@ -616,7 +650,7 @@ namespace SageBridge.Connector
         /// failure or rejection so the caller knows to retry later without
         /// re-running the Sage write.
         /// </summary>
-        private async Task<bool> SubmitJobResult(string jobId, string status, string sageId, string error)
+        private async Task<bool> SubmitJobResult(string jobId, string status, string sageId, string error, string companyId)
         {
             try
             {
@@ -627,7 +661,7 @@ namespace SageBridge.Connector
                     error
                 };
 
-                var response = await _auth.PostAsync($"/connector/jobs/{jobId}/result", resultData);
+                var response = await _auth.PostAsync($"/connector/jobs/{jobId}/result", resultData, companyId);
                 if (response.IsSuccessStatusCode)
                     return true;
 
@@ -646,6 +680,7 @@ namespace SageBridge.Connector
         private class Job
         {
             public string JobId { get; set; }
+            public string CompanyId { get; set; }
             public string Action { get; set; }
             public JObject Payload { get; set; }
             public string RequestId { get; set; }

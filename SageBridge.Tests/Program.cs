@@ -45,6 +45,12 @@ namespace SageBridge.Tests
 
             // Run Phase 1 pairing tests
             Phase1PairingTests.RunTests();
+
+            // Run Phase 6 multi-company safety tests
+            Phase6MultiCompanyTests.RunTests();
+
+            if (failed > 0 || Phase2RepositoryTests.failed > 0 || Phase1PairingTests.failed > 0 || Phase6MultiCompanyTests.Failed > 0)
+                Environment.ExitCode = 1;
         }
 
         static void Assert(bool condition, string testName, string detail = "")

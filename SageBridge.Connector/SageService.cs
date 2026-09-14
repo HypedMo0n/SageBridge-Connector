@@ -30,7 +30,10 @@ namespace SageBridge.Connector
         private const short ThirdPartyApplicationVersion = 1;
 
         private readonly ConnectorConfig _config;
+        private readonly ISageDatabaseSession _databaseSession;
+        private readonly Func<string> _companyNameReader;
         private readonly object _sdkLock = new object();
+        private readonly System.Threading.SemaphoreSlim _companyGate = new System.Threading.SemaphoreSlim(1, 1);
         private bool _disposed;
 
         // Repository instances for SQL-based read operations
@@ -41,12 +44,21 @@ namespace SageBridge.Connector
         private readonly ISageCompanyRepository _companyRepository;
 
         public string CompanyName { get; private set; } = "Not connected";
+        public string CurrentCloudCompanyId { get; private set; } = "";
+        public string CurrentCompanyPath { get; private set; } = "";
         public bool IsConnected { get; private set; }
 
         public SageService(ConnectorConfig config)
+            : this(config, new SimplySageDatabaseSession(), null)
+        {
+        }
+
+        internal SageService(ConnectorConfig config, ISageDatabaseSession databaseSession, Func<string>? companyNameReader)
         {
             _config = config ?? throw new ArgumentNullException(nameof(config));
-            
+            _databaseSession = databaseSession ?? throw new ArgumentNullException(nameof(databaseSession));
+            _companyNameReader = companyNameReader ?? ReadCompanyName;
+
             // Repositories are initialized but will only work after ConnectAsync()
             _quoteRepository = new SageQuoteRepository(this);
             _invoiceRepository = new SageInvoiceRepository(this);
@@ -57,60 +69,116 @@ namespace SageBridge.Connector
 
         public Task<bool> ConnectAsync()
         {
+            var profile = _config.ResolveCompanyProfiles().FirstOrDefault();
+            if (profile == null)
+            {
+                Log.Error("No enabled Sage company profile is configured.");
+                return Task.FromResult(false);
+            }
+            return ConnectAsync(profile);
+        }
+
+        public Task<bool> ConnectAsync(SageCompanyProfile profile)
+        {
+            if (profile == null)
+                throw new ArgumentNullException(nameof(profile));
+
             lock (_sdkLock)
             {
                 ThrowIfDisposed();
 
-                if (IsConnected)
+                var requestedPath = Path.GetFullPath(profile.SageCompanyPath);
+                if (IsConnected &&
+                    string.Equals(CurrentCloudCompanyId, profile.CloudCompanyId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(CurrentCompanyPath, requestedPath, StringComparison.OrdinalIgnoreCase))
                     return Task.FromResult(true);
 
-                if (string.IsNullOrWhiteSpace(_config.SageCompanyPath))
+                if (string.IsNullOrWhiteSpace(profile.SageCompanyPath))
                 {
-                    Log.Error("SageCompanyPath is empty. Set it to the full path of the Sage company .SAI file in config.json.");
+                    Log.Error("SageCompanyPath is empty for cloud company {CompanyId}.", profile.CloudCompanyId);
                     return Task.FromResult(false);
                 }
 
-                if (!File.Exists(_config.SageCompanyPath))
+                if (!File.Exists(profile.SageCompanyPath))
                 {
-                    Log.Error("Sage company file does not exist: {CompanyPath}", _config.SageCompanyPath);
+                    Log.Error("Sage company file does not exist: {CompanyPath}", profile.SageCompanyPath);
                     return Task.FromResult(false);
+                }
+
+                if (IsConnected)
+                {
+                    _databaseSession.CloseDatabase();
+                    ClearActiveCompany();
                 }
 
                 try
                 {
-                    Log.Information("Opening Sage 50 Canada company {CompanyPath} as {Username}...",
-                        _config.SageCompanyPath, _config.SageUsername);
+                    Log.Information("Opening Sage 50 Canada company {CompanyPath} for cloud company {CompanyId} as {Username}...",
+                        profile.SageCompanyPath, profile.CloudCompanyId, profile.SageUsername);
 
-                    SDKInstanceManager.SDKResult result;
-                    bool opened = SDKInstanceManager.Instance.OpenDatabase(
-                        _config.SageCompanyPath,
-                        _config.SageUsername,
-                        _config.SagePassword,
-                        _config.SageMultiUser,
-                        ThirdPartyApplicationName,
-                        ThirdPartyApplicationCode,
-                        ThirdPartyApplicationVersion,
-                        out result);
-
+                    string result;
+                    bool opened = _databaseSession.OpenDatabase(profile, out result);
                     if (!opened)
                     {
-                        Log.Error("Sage 50 Canada rejected the connection. SDK result: {SdkResult}", result);
+                        Log.Error("Sage 50 Canada rejected the connection for cloud company {CompanyId}. SDK result: {SdkResult}",
+                            profile.CloudCompanyId, result);
+                        ClearActiveCompany();
                         return Task.FromResult(false);
                     }
 
                     IsConnected = true;
-                    CompanyName = ReadCompanyName();
-                    Log.Information("Connected to Sage 50 Canada company: {CompanyName}", CompanyName);
+                    CurrentCloudCompanyId = profile.CloudCompanyId;
+                    CurrentCompanyPath = requestedPath;
+                    CompanyName = _companyNameReader();
+                    Log.Information("Connected cloud company {CompanyId} to Sage 50 company: {CompanyName}",
+                        CurrentCloudCompanyId, CompanyName);
                     return Task.FromResult(true);
                 }
                 catch (Exception ex)
                 {
-                    IsConnected = false;
-                    CompanyName = "Not connected";
-                    Log.Error(ex, "Failed to connect to Sage 50 Canada");
+                    ClearActiveCompany();
+                    Log.Error(ex, "Failed to connect cloud company {CompanyId} to Sage 50 Canada", profile.CloudCompanyId);
                     return Task.FromResult(false);
                 }
             }
+        }
+
+        public async Task RunForCompanyAsync(SageCompanyProfile profile, Func<Task> operation)
+        {
+            await _companyGate.WaitAsync();
+            try
+            {
+                if (!await ConnectAsync(profile))
+                    throw new InvalidOperationException($"Could not open Sage company for cloud company '{profile.CloudCompanyId}'.");
+                await operation();
+            }
+            finally
+            {
+                _companyGate.Release();
+            }
+        }
+
+        public async Task<T> RunForCompanyAsync<T>(SageCompanyProfile profile, Func<Task<T>> operation)
+        {
+            await _companyGate.WaitAsync();
+            try
+            {
+                if (!await ConnectAsync(profile))
+                    throw new InvalidOperationException($"Could not open Sage company for cloud company '{profile.CloudCompanyId}'.");
+                return await operation();
+            }
+            finally
+            {
+                _companyGate.Release();
+            }
+        }
+
+        private void ClearActiveCompany()
+        {
+            IsConnected = false;
+            CompanyName = "Not connected";
+            CurrentCloudCompanyId = "";
+            CurrentCompanyPath = "";
         }
 
         /// <summary>
@@ -783,10 +851,10 @@ namespace SageBridge.Connector
                     return;
 
                 if (IsConnected)
-                    SDKInstanceManager.Instance.CloseDatabase();
+                    _databaseSession.CloseDatabase();
 
-                IsConnected = false;
-                CompanyName = "Not connected";
+                ClearActiveCompany();
+                _companyGate.Dispose();
                 _disposed = true;
             }
         }

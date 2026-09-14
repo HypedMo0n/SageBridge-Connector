@@ -53,20 +53,19 @@ namespace SageBridge.Connector
         /// <summary>
         /// Sends an authenticated POST request to the cloud.
         /// </summary>
-        public async Task<HttpResponseMessage> PostAsync(string endpoint, object data)
+        public async Task<HttpResponseMessage> PostAsync(string endpoint, object data, string? companyId = null)
         {
             var json = JsonConvert.SerializeObject(data);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
-            return await PostAsync(endpoint, content);
+            return await PostAsync(endpoint, content, companyId);
         }
 
         /// <summary>
         /// Sends an authenticated POST request with pre-serialized content.
         /// </summary>
-        public async Task<HttpResponseMessage> PostAsync(string endpoint, HttpContent content)
+        public async Task<HttpResponseMessage> PostAsync(string endpoint, HttpContent content, string? companyId = null)
         {
-            var request = new HttpRequestMessage(HttpMethod.Post, $"{_workerUrl}{endpoint}");
-            AddAuthentication(request);
+            var request = CreateRequest(HttpMethod.Post, endpoint, companyId);
             request.Content = content;
             return await SendAsync(request);
         }
@@ -74,11 +73,22 @@ namespace SageBridge.Connector
         /// <summary>
         /// Sends an authenticated GET request to the cloud.
         /// </summary>
-        public async Task<HttpResponseMessage> GetAsync(string endpoint)
+        public async Task<HttpResponseMessage> GetAsync(string endpoint, string? companyId = null)
         {
-            var request = new HttpRequestMessage(HttpMethod.Get, $"{_workerUrl}{endpoint}");
-            AddAuthentication(request);
+            var request = CreateRequest(HttpMethod.Get, endpoint, companyId);
             return await SendAsync(request);
+        }
+
+        internal HttpRequestMessage CreateRequest(HttpMethod method, string endpoint, string? companyId = null)
+        {
+            var scope = string.IsNullOrWhiteSpace(companyId) ? _companyId : companyId.Trim();
+            if (string.IsNullOrWhiteSpace(scope))
+                throw new InvalidOperationException("A cloud company scope is required.");
+
+            var request = new HttpRequestMessage(method, $"{_workerUrl}{endpoint}");
+            AddAuthentication(request);
+            request.Headers.Add("X-Company-Id", scope);
+            return request;
         }
 
         private void AddAuthentication(HttpRequestMessage request)
