@@ -119,7 +119,7 @@ namespace SageBridge.Connector
 
             await ReportProvisioningAsync("syncing_quotes", 85, companyId);
             var quotes = await _sageService.GetQuotesAsync();
-            await PostToCloudAsync("/sync/quotes", new
+            await PostOptionalToCloudAsync("/sync/quotes", new
             {
                 TenantId = _config.TenantId,
                 CompanyId = profile.CloudCompanyId,
@@ -128,7 +128,7 @@ namespace SageBridge.Connector
             }, companyId);
 
             var invoiceSummary = await _sageService.GetInvoiceSummaryAsync();
-            await PostToCloudAsync("/sync/invoice-summary", new
+            await PostOptionalToCloudAsync("/sync/invoice-summary", new
             {
                 TenantId = _config.TenantId,
                 CompanyId = profile.CloudCompanyId,
@@ -166,6 +166,24 @@ namespace SageBridge.Connector
         {
             var response = await _auth.PostAsync(endpoint, data, companyId);
             response.EnsureSuccessStatusCode();
+        }
+
+        // Endpoints excluded from the frozen Beta data contract (quotes,
+        // invoice-summary). A missing/absent cloud route must not abort the
+        // authoritative customer/invoice/product sync for the company.
+        private async Task PostOptionalToCloudAsync(string endpoint, object data, string companyId)
+        {
+            try
+            {
+                var response = await _auth.PostAsync(endpoint, data, companyId);
+                if (!response.IsSuccessStatusCode)
+                    Log.Debug("Optional sync endpoint {Endpoint} for {CompanyId} not accepted ({StatusCode})",
+                        endpoint, companyId, response.StatusCode);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Optional sync endpoint {Endpoint} for {CompanyId} failed", endpoint, companyId);
+            }
         }
 
         public void Stop()
