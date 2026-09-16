@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Serilog;
@@ -26,9 +28,24 @@ namespace SageBridge.Connector
 
                 // Initialize components
                 var config = ConnectorConfig.Load();
-                var companyProfiles = config.ResolveCompanyProfiles();
-                if (companyProfiles.Count == 0)
-                    throw new InvalidOperationException("No enabled Sage company profiles are configured.");
+                List<SageCompanyProfile> companyProfiles;
+                try
+                {
+                    companyProfiles = config.ResolveCompanyProfiles().ToList();
+                }
+                catch (InvalidOperationException)
+                {
+                    // --setup can rescue a config with incomplete profiles.
+                    companyProfiles = new List<SageCompanyProfile>();
+                }
+
+                if (companyProfiles.Count == 0 &&
+                    (args.Length == 0 || (args[0] != "--setup" && args[0] != "--pair")))
+                {
+                    Console.WriteLine("No Sage company profiles are configured or one is incomplete.");
+                    Console.WriteLine("Run: SageBridgeConnector.exe --setup");
+                    return;
+                }
 
                 using var sageService = new SageService(config);
                 var apiServer = new ApiServer(config, sageService);
@@ -42,6 +59,15 @@ namespace SageBridge.Connector
                     var wizard = new PairingWizard(config.CloudflareWorkerUrl);
                     var paired = await wizard.RunAsync();
                     Environment.Exit(paired ? 0 : 1);
+                    return;
+                }
+
+                // Handle company setup mode
+                if (args.Length > 0 && args[0] == "--setup")
+                {
+                    var setupWizard = new CompanySetupWizard(config);
+                    var setup = setupWizard.Run();
+                    Environment.Exit(setup ? 0 : 1);
                     return;
                 }
 
