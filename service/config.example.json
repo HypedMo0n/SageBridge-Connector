@@ -1,0 +1,14 @@
+{
+  "ApiPort": 5001,
+  "TenantId": "your-tenant-id",
+  "CompanyId": "your-company-id",
+  "EnableCloudflare": true,
+  "CloudflareWorkerUrl": "https://your-worker.workers.dev",
+  "ApiKey": "your-api-key-here",
+  "SyncIntervalSeconds": 300,
+  "SageCompanyPath": "C:\Path\To\Your\Company.SAI",
+  "SageUsername": "your-sage-username",
+  "SagePassword": "your-sage-password",
+  "SageMultiUser": true,
+  "AutoConnect": true
+}

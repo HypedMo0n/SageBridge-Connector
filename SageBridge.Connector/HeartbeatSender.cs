@@ -93,7 +93,11 @@ namespace SageBridge.Connector
                 {
                     connectorVersion = ConnectorVersion.Current,
                     sageVersion = (string?)null,
-                    sageConnected
+                    sageConnected,
+                    companyName = profile.SageCompanyPath != null
+                        ? System.IO.Path.GetFileNameWithoutExtension(profile.SageCompanyPath)
+                        : null,
+                    sageCompanyName = _sageService.CompanyName
                 }, profile.CloudCompanyId);
 
                 if (!response.IsSuccessStatusCode)
