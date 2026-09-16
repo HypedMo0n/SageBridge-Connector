@@ -104,3 +104,5 @@ $RECYCLE.BIN/
 *.msix
 *.msixbundle
 *.msixupload
+service/
+*.zip
