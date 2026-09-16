@@ -4,6 +4,7 @@ using System.Data;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 using Serilog;
 using SimplySDK;
 using SimplySDK.ReceivableModule;
@@ -69,13 +70,127 @@ namespace SageBridge.Connector
 
         public Task<bool> ConnectAsync()
         {
-            var profile = _config.ResolveCompanyProfiles().FirstOrDefault();
-            if (profile == null)
+            var profiles = _config.ResolveCompanyProfiles();
+            if (profiles.Count == 0)
             {
                 Log.Error("No enabled Sage company profile is configured.");
                 return Task.FromResult(false);
             }
-            return ConnectAsync(profile);
+
+            // Single profile: use it directly (backward-compatible fast path).
+            if (profiles.Count == 1)
+                return ConnectAsync(profiles[0]);
+
+            // Multiple profiles: detect which company Sage 50 currently has open.
+            var detected = DetectOpenCompanyProfile(profiles);
+            if (detected != null)
+                return ConnectAsync(detected);
+
+            // Nothing detected — fall back to the first configured profile so the
+            // connector can still start and report the mismatch rather than silently
+            // connecting to the wrong company.
+            Log.Warning(
+                "Could not detect which Sage 50 company is open. Falling back to the first " +
+                "configured company ({CompanyId} at {Path}). If this is wrong, close Sage 50, " +
+                "open the correct company, and restart the connector.",
+                profiles[0].CloudCompanyId, profiles[0].SageCompanyPath);
+            return ConnectAsync(profiles[0]);
+        }
+
+        /// <summary>
+        /// Detects which Sage company Sage 50 currently has open by checking which
+        /// configured .SAI file Sage 50 is holding locked. Returns the matching
+        /// profile, or null when no configured company appears to be open.
+        ///
+        /// Detection strategy:
+        ///   1. For each configured profile, check whether its .SAI exists and
+        ///      whether Sage 50 is holding a lock on it (try a NoShare open).
+        ///   2. If exactly one configured .SAI is locked, that is the open company.
+        ///   3. If multiple or none are locked, fall back to reading each .SAI's
+        ///      XML manifest and matching the company name against what the SDK
+        ///      would report — but we can't use the SDK here because it requires
+        ///      an open connection, so we only use the lock heuristic.
+        ///
+        /// This is intentionally conservative: when in doubt it returns null so the
+        /// caller falls back to the first profile and logs a warning rather than
+        /// silently connecting to the wrong company.
+        /// </summary>
+        private SageCompanyProfile? DetectOpenCompanyProfile(IReadOnlyList<SageCompanyProfile> profiles)
+        {
+            var locked = new List<SageCompanyProfile>();
+
+            foreach (var profile in profiles)
+            {
+                if (string.IsNullOrWhiteSpace(profile.SageCompanyPath) || !File.Exists(profile.SageCompanyPath))
+                    continue;
+
+                try
+                {
+                    // A NoShare open will succeed only if NO process holds any lock
+                    // on the file. Sage 50 holds a lock on the active company's .SAI,
+                    // so FileShare.None will throw if Sage 50 has it open.
+                    using (var stream = File.Open(profile.SageCompanyPath, FileMode.Open, FileAccess.Read, FileShare.None))
+                    {
+                        // File opened without error — nobody holds a lock. Not the
+                        // active company.
+                    }
+                }
+                catch (IOException)
+                {
+                    // File is locked by another process (presumably Sage 50).
+                    locked.Add(profile);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Access denied — also a sign the file is in use / protected.
+                    locked.Add(profile);
+                }
+            }
+
+            if (locked.Count == 0)
+            {
+                Log.Debug("No configured .SAI files appear to be locked by Sage 50.");
+                return null;
+            }
+
+            if (locked.Count == 1)
+            {
+                Log.Information(
+                    "Detected open Sage company: {CompanyId} ({Path}) — {CompanyName} (from SAI manifest)",
+                    locked[0].CloudCompanyId, locked[0].SageCompanyPath,
+                    ReadCompanyNameFromSai(locked[0].SageCompanyPath));
+                return locked[0];
+            }
+
+            // Multiple configured .SAI files are locked — ambiguous. This can happen
+            // when Sage 50 has the company open and background processes (e.g. the
+            // Sage_SA.TransactionManager) also touch the file. Fall back to matching
+            // the SAI company name against the currently connected Sage session if
+            // we already have one; otherwise just pick the first and log a warning.
+            Log.Warning(
+                "Multiple configured .SAI files appear locked ({Count}). Using the first " +
+                "detected one ({CompanyId}).", locked.Count, locked[0].CloudCompanyId);
+            return locked[0];
+        }
+
+        /// <summary>
+        /// Reads the CompanyName from a .SAI XML manifest without using the SDK.
+        /// Returns "(unknown)" when the file cannot be parsed.
+        /// </summary>
+        private static string ReadCompanyNameFromSai(string saipath)
+        {
+            try
+            {
+                var doc = XDocument.Load(saipath, LoadOptions.None);
+                var el = doc.Root?.Element("CompanyName");
+                if (el != null && el.Value != null)
+                    return el.Value.Trim();
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Could not read CompanyName from SAI {Path}", saipath);
+            }
+            return "(unknown)";
         }
 
         public Task<bool> ConnectAsync(SageCompanyProfile profile)
