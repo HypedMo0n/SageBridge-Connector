@@ -71,17 +71,17 @@ namespace SageBridge.Connector
                     return;
                 }
 
-                // Check if connector is paired
+                // Check if connector is paired. If not, show the first-run GUI.
                 if (!CredentialManager.HasStoredIdentity())
                 {
-                    Log.Error("Connector is not paired. Run with --pair to pair this connector.");
-                    Console.WriteLine();
-                    Console.WriteLine("This connector needs to be paired with your SageBridge account.");
-                    Console.WriteLine("Run: SageBridgeConnector.exe --pair");
-                    Console.WriteLine();
-                    Console.WriteLine("Or generate a pairing code from your SageBridge dashboard.");
-                    Console.ReadLine();
-                    return;
+                    Log.Information("Connector is not paired. Showing first-run pairing GUI...");
+                    var guiResult = SageBridge.GuiPanel.FirstRunWindow.Run(config.CloudflareWorkerUrl);
+                    if (guiResult != 0)
+                    {
+                        Log.Error("Pairing was not completed.");
+                        return;
+                    }
+                    Log.Information("Pairing successful.");
                 }
 
                 // Start API server

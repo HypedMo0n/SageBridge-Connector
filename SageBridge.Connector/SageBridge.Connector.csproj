@@ -12,6 +12,11 @@
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
   </PropertyGroup>
 
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
   <ItemGroup>
       <PackageReference Include="Microsoft.AspNet.WebApi.Owin" Version="5.2.9" />
       <PackageReference Include="Microsoft.Owin.Host.HttpListener" Version="4.2.2" />
