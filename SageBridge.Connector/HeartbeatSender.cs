@@ -97,7 +97,9 @@ namespace SageBridge.Connector
                     companyName = profile.SageCompanyPath != null
                         ? System.IO.Path.GetFileNameWithoutExtension(profile.SageCompanyPath)
                         : null,
-                    sageCompanyName = _sageService.CompanyName
+                    sageCompanyName = _sageService.CompanyName,
+                    supportedActions = ConnectorCapabilities.SupportedActions,
+                    supportedSync = ConnectorCapabilities.SupportedSync
                 }, profile.CloudCompanyId);
 
                 if (!response.IsSuccessStatusCode)

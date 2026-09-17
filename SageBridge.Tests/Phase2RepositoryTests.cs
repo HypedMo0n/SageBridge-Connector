@@ -359,6 +359,33 @@ namespace SageBridge.Tests
             Assert(program.Contains("new HeartbeatSender("), "Program.cs instantiates HeartbeatSender");
             Assert(program.Contains("heartbeatSender.Start()"), "Program.cs starts the heartbeat sender");
             Assert(program.Contains("heartbeatSender.Stop()"), "Program.cs stops the heartbeat sender on shutdown");
+
+            // Heartbeat advertises connector capabilities to the cloud - guard
+            // against it silently drifting from what the connector actually does.
+            Assert(heartbeatSender.Contains("supportedActions = ConnectorCapabilities.SupportedActions"), "Heartbeat advertises its real supported job actions");
+            Assert(heartbeatSender.Contains("supportedSync = ConnectorCapabilities.SupportedSync"), "Heartbeat advertises its real supported sync datasets");
+
+            var capabilities = File.ReadAllText(SourceFile("ConnectorCapabilities.cs"));
+            var jobPoller = File.ReadAllText(SourceFile("JobPoller.cs"));
+            var syncEngine = File.ReadAllText(SourceFile("SyncEngine.cs"));
+            foreach (var action in new[] { "customer.create", "quote.create", "invoice.create" })
+            {
+                Assert(capabilities.Contains($"\"{action}\""), $"ConnectorCapabilities declares {action}");
+                Assert(jobPoller.Contains($"case \"{action}\":"), $"JobPoller actually dispatches {action} (capabilities list must not claim more than is implemented)");
+            }
+            // Every action JobPoller actually dispatches (excluding the internal
+            // job-status labels checked elsewhere in this file) must also be
+            // advertised - catches the capabilities list silently falling BEHIND
+            // a newly added real action, not just running ahead of one.
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(jobPoller, @"case ""([a-z]+\.[a-z]+)"":"))
+            {
+                Assert(capabilities.Contains($"\"{m.Groups[1].Value}\""), $"ConnectorCapabilities must advertise every action JobPoller dispatches ({m.Groups[1].Value})");
+            }
+            foreach (var dataset in new[] { "customers", "invoices", "products", "quotes", "invoice-summary" })
+            {
+                Assert(capabilities.Contains($"\"{dataset}\""), $"ConnectorCapabilities declares the {dataset} sync dataset");
+                Assert(syncEngine.Contains($"/sync/{dataset}"), $"SyncEngine actually posts to /sync/{dataset}");
+            }
         }
 
         // ---------------------------------------------------------------------------

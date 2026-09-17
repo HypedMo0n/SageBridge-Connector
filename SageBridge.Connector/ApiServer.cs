@@ -96,7 +96,7 @@ namespace SageBridge.Connector
                 Connected = Sage.IsConnected,
                 Company = Sage.CompanyName,
                 Timestamp = DateTime.UtcNow,
-                Version = "1.0.0"
+                Version = ConnectorVersion.Current
             });
         }
     }
