@@ -103,7 +103,22 @@ namespace SageBridge.Connector
         {
             using var client = new HttpClient();
             client.Timeout = TimeSpan.FromSeconds(30);
-            return await client.SendAsync(request);
+            var response = await client.SendAsync(request);
+
+            // A 401 here means the cloud rejected this machine's credential
+            // outright (revoked/disconnected, or never valid) - distinct from
+            // a transient network or server error. Every caller
+            // (HeartbeatSender, JobPoller, SyncEngine) already logs the raw
+            // status on failure; this adds one unambiguous line so "credential
+            // revoked, needs re-pairing" is never confused with a transient
+            // fault in those logs. Never throws and never changes what is
+            // returned - callers keep handling the response exactly as before.
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                Log.Warning("This connector's credential was rejected by the cloud (not paired, or pairing was revoked). Re-run pairing with --pair to reconnect.");
+            }
+
+            return response;
         }
     }
 }
